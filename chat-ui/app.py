@@ -36,9 +36,9 @@ def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     client = get_qdrant_client()
     model = get_embed_model()
     vector = model.encode(query).tolist()
-    hits = client.search("jayli_code", query_vector=vector, limit=top_k)
+    hits = client.query_points("jayli_code", query=vector, limit=top_k)
     results = []
-    for h in hits:
+    for h in hits.points:
         p = h.payload
         results.append({
             "source": "qdrant",
