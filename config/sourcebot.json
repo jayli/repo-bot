@@ -1,14 +1,18 @@
 {
   "$schema": "https://raw.githubusercontent.com/sourcebot-dev/sourcebot/main/schemas/v3/index.json",
   "connections": {
-    "local-repos": {
-      "type": "git",
-      "url": "file:///repos/*"
-    }
-  },
-  "llm": {
-    "provider": "${LLM_PROVIDER}",
-    "model": "${LLM_MODEL}",
-    "apiKey": "${ANTHROPIC_API_KEY}"
+    "anyproxy":         { "type": "git", "url": "file:///repos/anyproxy" },
+    "block-proxy":      { "type": "git", "url": "file:///repos/block-proxy" },
+    "cf-ech":           { "type": "git", "url": "file:///repos/cf-ech" },
+    "copilot-nvim":     { "type": "git", "url": "file:///repos/copilot.nvim" },
+    "gogogo":           { "type": "git", "url": "file:///repos/gogogo" },
+    "js-perf":          { "type": "git", "url": "file:///repos/js-perf" },
+    "mc-lite":          { "type": "git", "url": "file:///repos/mc-lite" },
+    "nvim-colors":      { "type": "git", "url": "file:///repos/nvim-colors" },
+    "passwall-any":     { "type": "git", "url": "file:///repos/passwall-any" },
+    "repo-bot":         { "type": "git", "url": "file:///repos/repo-bot" },
+    "rtsp-downloader":  { "type": "git", "url": "file:///repos/rtsp-downloader" },
+    "skills":           { "type": "git", "url": "file:///repos/skills" },
+    "Xray-core":        { "type": "git", "url": "file:///repos/Xray-core" }
   }
 }

@@ -1,6 +1,6 @@
 services:
   sourcebot:
-    image: ghcr.io/sourcebot-dev/sourcebot:latest
+    image: ghcr.io/sourcebot-dev/sourcebot:v4.0.0
     ports:
       - "3000:3000"
     volumes:
