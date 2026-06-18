@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/sourcebot-dev/sourcebot/main/schemas/v3/index.json",
+  "connections": {
+    "local-repos": {
+      "type": "git",
+      "url": "file:///repos/*"
+    }
+  },
+  "llm": {
+    "provider": "${LLM_PROVIDER}",
+    "model": "${LLM_MODEL}",
+    "apiKey": "${ANTHROPIC_API_KEY}"
+  }
+}

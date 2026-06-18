@@ -1,0 +1,6 @@
+.env
+qdrant_data/
+sourcebot_data/
+__pycache__/
+*.pyc
+chat-ui/.streamlit/

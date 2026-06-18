@@ -1,0 +1,41 @@
+services:
+  sourcebot:
+    image: ghcr.io/sourcebot-dev/sourcebot:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ${REPOS_ROOT:-~/jayli}:/repos:ro
+      - ./config/sourcebot.json:/data/config.json:ro
+      - sourcebot_data:/data
+    environment:
+      - CONFIG_PATH=/data/config.json
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  chat-ui:
+    build: ./chat-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - SOURCEBOT_URL=http://sourcebot:3000
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
+    depends_on:
+      - qdrant
+      - sourcebot
+    restart: unless-stopped
+
+volumes:
+  sourcebot_data:
+  qdrant_data:
