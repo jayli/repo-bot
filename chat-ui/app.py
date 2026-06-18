@@ -56,7 +56,7 @@ def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
 
     try:
         client = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
-        model = SentenceTransformer("BAAI/bge-m3")
+        model = SentenceTransformer("all-MiniLM-L6-v2")
         vector = model.encode(query).tolist()
         hits = client.search("jayli_code", query_vector=vector, limit=top_k)
         return [{

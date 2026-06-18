@@ -7,7 +7,7 @@
     "restart": "docker compose down && docker compose up -d",
     "logs": "docker compose logs -f",
     "ps": "docker compose ps",
-    "index": "python3 scripts/index-vectors.py",
+    "index": "docker cp chat-ui/index_code.py repo-bot-chat-ui-1:/app/index_code.py && docker exec repo-bot-chat-ui-1 python /app/index_code.py",
     "index:chroma": "python3 scripts/index-vectors.py --backend chroma",
     "index:incr": "bash scripts/incremental-index.sh",
     "search": "python3 scripts/index-vectors.py --search",

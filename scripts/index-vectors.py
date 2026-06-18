@@ -10,7 +10,7 @@ import hashlib
 import argparse
 from pathlib import Path
 
-import chromadb  # lightweight fallback if Qdrant not available
+# chromadb is an optional fallback, imported only when --backend chroma is used
 
 # === 配置 ===
 REPOS_ROOT = os.path.expanduser(os.environ.get("REPOS_ROOT", "~/jayli"))
