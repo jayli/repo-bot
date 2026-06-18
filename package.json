@@ -1,0 +1,18 @@
+{
+  "name": "repo-bot",
+  "private": true,
+  "scripts": {
+    "up": "docker compose up -d",
+    "down": "docker compose down",
+    "restart": "docker compose down && docker compose up -d",
+    "logs": "docker compose logs -f",
+    "ps": "docker compose ps",
+    "index": "python3 scripts/index-vectors.py",
+    "index:chroma": "python3 scripts/index-vectors.py --backend chroma",
+    "index:incr": "bash scripts/incremental-index.sh",
+    "search": "python3 scripts/index-vectors.py --search",
+    "open": "open http://localhost:8501",
+    "open:sourcebot": "open http://localhost:3000",
+    "open:qdrant": "open http://localhost:6333/dashboard"
+  }
+}
