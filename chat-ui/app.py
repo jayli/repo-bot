@@ -98,7 +98,7 @@ def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
 
 @st.cache_data(ttl=600)
 def ask_llm(question: str, ctx_json: str) -> str:
-    import anthropic
+    import anthropic, httpx
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
     if not api_key:
@@ -119,6 +119,8 @@ def ask_llm(question: str, ctx_json: str) -> str:
     client_kwargs = {"api_key": api_key}
     if base_url:
         client_kwargs["base_url"] = base_url
+    # 容器内跳过 SSL 验证（宿主机已信任自签证书，但容器内未导入 CA）
+    client_kwargs["http_client"] = httpx.Client(verify=False)
     client = anthropic.Anthropic(**client_kwargs)
     resp = client.messages.create(
         model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
