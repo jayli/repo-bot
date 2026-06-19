@@ -22,6 +22,17 @@
     "index:ast": "docker exec repo-bot-ast-service-1 python /app/indexer.py --mode full",
     "index:ast:incr": "docker exec repo-bot-ast-service-1 python /app/indexer.py --mode incremental",
     "open:ast": "open http://localhost:8502/docs",
-    "clean": "docker image prune -f"
+    "clean": "docker image prune -f",
+    "build_push:chat-ui": "bash scripts/docker-build-push.sh chat-ui",
+    "build_push:ast-service": "bash scripts/docker-build-push.sh ast-service",
+    "build_push:chat-ui:arm": "bash scripts/docker-build-push.sh chat-ui arm64",
+    "build_push:chat-ui:x86": "bash scripts/docker-build-push.sh chat-ui amd64",
+    "build_push:ast-service:arm": "bash scripts/docker-build-push.sh ast-service arm64",
+    "build_push:ast-service:x86": "bash scripts/docker-build-push.sh ast-service amd64",
+    "build_push:chat-ui:all": "bash scripts/docker-build-push.sh chat-ui all",
+    "build_push:ast-service:all": "bash scripts/docker-build-push.sh ast-service all",
+    "docker_push:chat-ui": "bash scripts/docker-push-existing.sh chat-ui",
+    "docker_push:ast-service": "bash scripts/docker-push-existing.sh ast-service",
+    "install": "bash scripts/install.sh"
   }
 }

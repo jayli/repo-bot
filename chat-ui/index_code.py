@@ -5,17 +5,18 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-MODEL = "text-embedding-v4"
-DIM = 1024
+MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-v4")
+DIM = int(os.environ.get("EMBEDDING_DIM", "1024"))
 REPOS = os.environ.get("REPOS_ROOT", "/repos")
 QDRANT = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
+API_KEY = os.environ.get("EMBEDDING_API_KEY", os.environ.get("DASHSCOPE_API_KEY", ""))
+BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "codebase")
 
 SKIP = {"node_modules", ".git", "__pycache__", "target", "dist", ".venv", "venv", "build", ".next", "vendor", "vendor_"}
 EXT = {".py", ".ts", ".tsx", ".go", ".rs", ".java", ".js", ".jsx", ".vue", ".sql", ".yaml", ".toml", ".tf", ".lua", ".c", ".cpp", ".h", ".sh"}
 
-client = OpenAI(api_key=API_KEY, base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 print(f"Model: {MODEL}  dim={DIM}  Repos: {REPOS}  Qdrant: {QDRANT}")
 sys.stdout.flush()

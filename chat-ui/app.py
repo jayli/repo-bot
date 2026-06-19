@@ -63,8 +63,8 @@ st.title("repo-bot — 本地代码知识库")
 @st.cache_resource
 def get_openai_client():
     return OpenAI(
-        api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key=os.environ.get("EMBEDDING_API_KEY", os.environ.get("DASHSCOPE_API_KEY", "")),
+        base_url=os.environ.get("EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
     )
 
 @st.cache_resource
@@ -74,13 +74,15 @@ def get_qdrant_client():
 
 def embed_query(text: str) -> list[float]:
     client = get_openai_client()
-    resp = client.embeddings.create(model="text-embedding-v4", input=text, dimensions=1024, encoding_format="float")
+    model = os.environ.get("EMBEDDING_MODEL", "text-embedding-v4")
+    dim = int(os.environ.get("EMBEDDING_DIM", "1024"))
+    resp = client.embeddings.create(model=model, input=text, dimensions=dim, encoding_format="float")
     return resp.data[0].embedding
 
 # === 侧边栏 ===
 with st.sidebar:
     st.header("配置")
-    st.caption(f"Embedding: text-embedding-v4 (DashScope 直连)")
+    st.caption(f"Embedding: {os.environ.get('EMBEDDING_MODEL', 'text-embedding-v4')} ({os.environ.get('EMBEDDING_BASE_URL', 'dashscope')})")
     st.caption(f"Qdrant: {os.environ.get('QDRANT_URL', 'http://localhost:6333')}")
     st.caption(f"Sourcebot: {os.environ.get('SOURCEBOT_URL', 'http://localhost:3000')}")
     st.caption(f"LLM: {os.environ.get('LLM_MODEL', 'claude-sonnet-4-6')} (yui.cool)")

@@ -30,6 +30,18 @@ npm run deploy                 # 快速部署 chat-ui（--no-deps --build）
 npm run deploy:chat-ui         # 同上
 npm run deploy:ast-service     # 快速部署 ast-service
 npm run deploy:all             # 全量重建并部署所有服务
+
+npm run install                # 一键安装脚本（新手部署，交互设置参数）
+
+npm run build_push:chat-ui     # 构建当前平台 chat-ui 镜像并推送到阿里云 ACR
+npm run build_push:ast-service # 构建当前平台 ast-service 镜像并推送
+npm run build_push:chat-ui:arm / :x86  # 指定平台构建推送
+npm run build_push:ast-service:arm / :x86
+npm run build_push:chat-ui:all # 构建双平台（amd64+arm64）镜像并推送 + manifest
+npm run build_push:ast-service:all
+
+npm run docker_push:chat-ui    # 将本地已编译好的 chat-ui 镜像推送远端（自动识架构）
+npm run docker_push:ast-service# 同上，ast-service
 ```
 
 **chat-ui 代码变更生效**：
@@ -72,7 +84,7 @@ REPOS_ROOT (只读挂载 :ro)
         支持多轮对话（最近 10 轮送 LLM），会话以 URL token 持久化在服务端
 ```
 
-**Embedding**：`text-embedding-v4`，阿里云 DashScope 直连（`https://dashscope.aliyuncs.com/compatible-mode/v1`），不走 yui.cool。
+**Embedding**：通过环境变量配置（OpenAI 兼容接口），支持任意 embedding 服务。关键变量：`EMBEDDING_MODEL`（默认 text-embedding-v4）、`EMBEDDING_DIM`（默认 1024）、`EMBEDDING_BASE_URL`（默认 DashScope 直连）、`EMBEDDING_API_KEY`（留空则 fallback `DASHSCOPE_API_KEY`）。`chat-ui/app.py` 和 `chat-ui/index_code.py` 均从这些环境变量读取，不再硬编码。
 
 **LLM**：`https://yui.cool:996`，Anthropic 协议格式，默认模型由 `LLM_MODEL` 环境变量控制。
 
@@ -91,3 +103,5 @@ REPOS_ROOT (只读挂载 :ro)
 - **ast-service 测试**：在 `ast-service/` 目录下执行 `python -m pytest -v`（28 个测试）。测试不依赖数据库文件，用 fixture 仓库和内存 SQLite。
 - **SCIP protobuf**：`ast-service/scip_proto/scip_pb2.py` 由真实 `scip.proto` 通过 `grpc_tools.protoc` 生成，非手写 stub。导出端点 `/scip/export?repo=xxx` 返回有效 SCIP payload，可被 `scip_pb2.Index.ParseFromString()` 反序列化。
 - **调用图链接**：`link_calls_in_file()` 按符号行范围窄先匹配（防外层类覆盖内层方法），`link_callee_symbols()` 跨文件按名称匹配。
+- **Docker 镜像发布**：chat-ui / ast-service 推送到阿里云 ACR 个人版 `crpi-x1zji86f6jpcd7t1.cn-hangzhou.personal.cr.aliyuncs.com/lijing00333/`。单平台镜像用 `latest-amd64` / `latest-arm64` 标签，双平台用 `latest` manifest。Qdrant 和 Sourcebot 为公共镜像，不纳入构建发布流程。
+- **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot 来自 Docker Hub/GHCR）。
