@@ -11,13 +11,14 @@ npm run up / down / restart   # Docker Compose 启停
 npm run logs                   # 查看三个容器日志
 npm run ps                     # 容器状态
 
+npm run init                   # 首次使用：生成 .env 和 config/sourcebot.json
 npm run index                  # 全量重建向量索引（复制 index_code.py 到容器内执行）
 npm run open                   # 打开 Chat UI http://localhost:8501
 npm run open:sourcebot         # 打开 Sourcebot http://localhost:3000
 npm run open:qdrant            # 打开 Qdrant Dashboard http://localhost:6333/dashboard
 ```
 
-**重启 chat-ui 让代码变更生效**（不改模型/APi key 时 skip）：
+**重启 chat-ui 让代码变更生效**（不改模型/API key 时跳过）：
 ```bash
 docker compose build --no-cache chat-ui && docker compose up -d chat-ui
 ```
@@ -53,8 +54,9 @@ REPOS_ROOT (只读挂载 :ro)
 
 ## 关键注意
 
-- **环境变量**：`.env` 不提交。`.env.example` 是模板。
-- **Sourcebot v4 管理员**：email `admin@local.dev`，用户由 SQLite 直插创建，非注册页。清 `sourcebot_data` 卷会丢失登录态。
+- **环境变量**：`.env` 和 `config/sourcebot.json` 不提交。`.env.example` 和 `config/sourcebot.json.example` 是模板，`npm run init` 一键复制（不会覆盖已有文件）。
+- **Sourcebot v4 管理员**：首次启动后访问 http://localhost:3000 注册管理员账号。清 `sourcebot_data` 卷会丢失登录态。
+- **Chat UI 无登录**：8501 端口完全公开，Streamlit 无内置认证。
 - **容器内 SSL**：yui.cool 自签证书 → `chat-ui/app.py` 里 `httpx.Client(verify=False)`。
 - **ThinkingBlock**：DeepSeek 返回推理块无 `.text` 属性 → `ask_llm` 遍历 `resp.content` 找有 `.text` 的 block。
 - **Qdrant API**：新版 qdrant-client 用 `client.query_points(collection, query=vector, limit=n)`，返回 `.points`。
