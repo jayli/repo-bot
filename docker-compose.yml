@@ -31,6 +31,7 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - SOURCEBOT_URL=http://sourcebot:3000
       - REPOS_ROOT=/repos
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
       - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
