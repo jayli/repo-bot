@@ -8,11 +8,26 @@ import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
+import hashlib
+
 st.set_page_config(page_title="repo-bot", page_icon="🤖", layout="wide")
 
-# === 鉴权 ===
+def _auth_token() -> str:
+    user = os.environ.get("CHAT_USERNAME", "admin")
+    pwd = os.environ.get("CHAT_PASSWORD", "admin123")
+    return hashlib.sha256(f"{user}:{pwd}".encode()).hexdigest()[:16]
+
+# === 鉴权（URL token 持久化） ===
 if "authenticated" not in st.session_state:
+    token = st.query_params.get("token")
+    st.session_state.authenticated = (token == _auth_token())
+
+# === 退出登录 ===
+if st.query_params.get("logout") == "1" and st.session_state.authenticated:
     st.session_state.authenticated = False
+    st.session_state.messages = []
+    st.query_params.clear()
+    st.rerun()
 
 if not st.session_state.authenticated:
     st.title("repo-bot — 登录")
@@ -24,6 +39,7 @@ if not st.session_state.authenticated:
             env_pass = os.environ.get("CHAT_PASSWORD", "admin123")
             if username == env_user and password == env_pass:
                 st.session_state.authenticated = True
+                st.query_params["token"] = _auth_token()
                 st.rerun()
             else:
                 st.error("用户名或密码错误")
@@ -60,10 +76,8 @@ with st.sidebar:
     use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
     use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
     st.divider()
-    if st.button("退出登录"):
-        st.session_state.authenticated = False
-        st.session_state.messages = []
-        st.rerun()
+    st.caption(f"👤 {os.environ.get('CHAT_USERNAME', 'admin')}")
+    st.markdown("<a href='?logout=1' style='font-size:14px;'>退出登录</a>", unsafe_allow_html=True)
 
 # === 搜索后端 ===
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
