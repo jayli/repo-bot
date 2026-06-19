@@ -453,6 +453,8 @@ The first version should store a useful, approximate call graph:
 
 This is intentionally not a full type-aware call graph. Dynamic dispatch, imported aliases, monkey patching, and language-specific overload resolution are out of scope for the first phase.
 
+Known Phase 1 limitation: broad call rules such as `$CALLEE($$$ARGS)` can match the signature portion of a function definition, for example `def load_user(user_id):`. That may produce an extra self-like call edge on the definition line. This is acceptable for the first "rough knowledge association" version because the fact is local and easy for the LLM to discount. A later refinement can tighten YAML rules or filter matches that overlap known definition ranges.
+
 ## FastAPI Endpoints
 
 Health and status:
@@ -739,6 +741,10 @@ Mitigation: start with Python and JavaScript/TypeScript, use fixtures, and expan
 Risk: call graph precision may be overestimated.
 
 Mitigation: document call edges as best-effort and store unresolved `callee_name` even when no symbol link exists.
+
+Risk: broad call rules can match function definition signatures.
+
+Mitigation: accept this in Phase 1 as a known false-positive class. In Phase 2 or a refinement pass, filter call matches that overlap definition ranges or tighten YAML rules with ast-grep constraints.
 
 Risk: SQLite writes can become slow on very large repository sets.
 

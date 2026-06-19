@@ -1038,10 +1038,9 @@ def test_normalize_python_symbols_extracts_basic_names():
     assert symbols[1].kind == "class"
 
 
-def test_normalize_calls_ignores_definitions():
+def test_normalize_calls_uses_callee_capture():
     matches = [
         AstGrepMatch("load_user(user_id)", 5, 5, 4, 13, {"CALLEE": "load_user"}, "python-calls"),
-        AstGrepMatch("def load_user(user_id):\n    pass", 10, 11, 4, 13, {"NAME": "load_user"}, "python-functions", "function"),
     ]
 
     calls = normalize_calls("repo", "repo/app.py", matches)
@@ -1135,6 +1134,8 @@ def normalize_calls(repo: str, path: str, matches: list[AstGrepMatch]) -> list[C
     for match in matches:
         callee = match.captures.get("CALLEE")
         if callee:
+            # Phase 1 intentionally accepts broad call-rule false positives,
+            # including definition signatures matched by `$CALLEE($$$ARGS)`.
             records.append(
                 CallRecord(repo=repo, path=path, callee_name=callee, call_line=match.start_line)
             )
@@ -3029,6 +3030,7 @@ Phase 1:
 - No application code directly traverses tree-sitter ASTs.
 - Normalizer uses ast-grep captures instead of regex extraction.
 - ast-grep extraction rules live in YAML files.
+- Phase 1 may include call false positives on function definition lines from broad `$CALLEE($$$ARGS)` rules; this is documented and not a failure.
 
 Phase 2:
 
