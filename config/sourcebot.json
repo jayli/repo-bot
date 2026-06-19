@@ -13,6 +13,8 @@
     "repo-bot":         { "type": "git", "url": "file:///repos/repo-bot" },
     "rtsp-downloader":  { "type": "git", "url": "file:///repos/rtsp-downloader" },
     "skills":           { "type": "git", "url": "file:///repos/skills" },
+    "vim-easycomplete": { "type": "git", "url": "file:///repos/vim-easycomplete" },
+    "openclaw":         { "type": "git", "url": "file:///repos/openclaw" },
     "Xray-core":        { "type": "git", "url": "file:///repos/Xray-core" }
   }
 }
