@@ -96,7 +96,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     st.caption(f"👤 {os.environ.get('CHAT_USERNAME', 'admin')}")
-    st.markdown("<a href='?logout=1' style='font-size:14px;'>退出登录</a>", unsafe_allow_html=True)
+    st.markdown("<a href='?logout=1' target='_self' style='font-size:14px;'>退出登录</a>", unsafe_allow_html=True)
 
 # === 搜索后端 ===
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
