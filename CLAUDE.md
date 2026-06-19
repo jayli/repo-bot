@@ -10,26 +10,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run up / down / restart   # Docker Compose 启停
 npm run logs                   # 查看容器日志
 npm run ps                     # 容器状态
+npm run clean                  # 清理悬空镜像
 
 npm run init                   # 首次使用：生成 .env 和 config/sourcebot.json
-npm run index                  # 全量重建向量索引（复制 index_code.py 到容器内执行）
+npm run dev                    # 本地开发 chat-ui（停止容器内 chat-ui，宿主机直接跑 streamlit）
 npm run open                   # 打开 Chat UI http://localhost:8501
 npm run open:sourcebot         # 打开 Sourcebot http://localhost:3000
 npm run open:qdrant            # 打开 Qdrant Dashboard http://localhost:6333/dashboard
+npm run open:ast               # 打开 ast-service API 文档 http://localhost:8502/docs
+
+npm run index                  # 全量重建向量索引（复制 index_code.py 到容器内执行）
+npm run index:incr             # 增量向量索引
+npm run search                 # 命令行语义搜索测试
 
 npm run index:ast              # 全量 AST 结构索引（所有仓库）
 npm run index:ast:incr         # 增量 AST 结构索引
-npm run open:ast               # 打开 ast-service API 文档 http://localhost:8502/docs
+
+npm run deploy                 # 快速部署 chat-ui（--no-deps --build）
+npm run deploy:chat-ui         # 同上
+npm run deploy:ast-service     # 快速部署 ast-service
+npm run deploy:all             # 全量重建并部署所有服务
 ```
 
 **chat-ui 代码变更生效**：
 ```bash
-docker compose build --no-cache chat-ui && docker compose up -d chat-ui
+npm run deploy:chat-ui
 ```
 
 **ast-service 代码变更生效**：
 ```bash
-docker compose build --no-cache ast-service && docker compose up -d ast-service
+npm run deploy:ast-service
 ```
 
 **仅 `.env` 变更**（不重建镜像，仅重启容器重读环境变量）：
