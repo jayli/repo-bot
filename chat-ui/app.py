@@ -128,7 +128,11 @@ def ask_llm(question: str, ctx_json: str) -> str:
         system="你是代码知识库助手。根据提供的代码片段用中文回答用户问题，引用具体文件路径和行号。",
         messages=[{"role": "user", "content": f"上下文代码:\n{ctx_text}\n\n问题: {question}"}],
     )
-    return resp.content[0].text
+    # yui.cool 代理返回的模型可能有 ThinkingBlock（无 .text 只有 .thinking）
+    for block in resp.content:
+        if hasattr(block, "text") and block.text:
+            return block.text
+    return "(模型未生成文本回答，可能只返回了 thinking block)"
 
 # === 主界面 ===
 if "messages" not in st.session_state:
