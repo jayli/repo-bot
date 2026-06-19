@@ -64,7 +64,7 @@ for root, dirs, files in os.walk(REPOS):
 
 print(f"\n[3/3] Embedding {ccount} chunks via {MODEL} (batch=25)...")
 points, done = [], 0
-batch_size = 25
+batch_size = 20  # DashScope 限制 ≤20
 
 for i in range(0, len(text_batch), batch_size):
     batch_texts = text_batch[i:i + batch_size]
