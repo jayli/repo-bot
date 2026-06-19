@@ -1,6 +1,6 @@
 # repo-bot
 
-本地代码知识库 — 为 `REPOS_ROOT` 下所有仓库提供代码搜索 + 语义检索 + 结构检索 + AI 对话。
+本地代码知识库 — 为 `REPOS_ROOT`（替换为你仓库集合根目录） 下所有仓库提供代码搜索 + 语义检索 + 结构检索 + AI 对话。
 
 ## 架构
 
@@ -18,6 +18,19 @@ REPOS_ROOT/* 仓库
 ```
 
 ## 新手安装
+
+### 1）前期准备
+
+安装前准备好以下信息（脚本会逐项询问，按 Enter 使用默认值）：
+
+1. **代码仓库根目录** — 本地所有 git 仓库的父目录（默认 `~/projects`）
+2. **LLM 配置** — Provider 类型（anthropic/openai）、API Key、模型名、代理地址（可选）
+3. **Embedding 配置** — 模型名（默认 `text-embedding-v4`）、维度（默认 1024）、API URL、API Key（留空则复用 LLM Key）
+4. **向量库集合名** — Qdrant collection 名称（默认 `codebase`）
+5. **Chat UI 登录** — 用户名/密码（默认 `admin`/`admin123`）
+6. **Sourcebot API Key** — 可先留空，安装后去 `http://localhost:3000` 后台生成，再填入 `~/.repo-bot/.env`
+
+### 2）执行安装
 
 无需克隆仓库，一个脚本完成全部部署：
 
