@@ -37,8 +37,8 @@ with st.sidebar:
     st.caption(f"Sourcebot: {os.environ.get('SOURCEBOT_URL', 'http://localhost:3000')}")
     st.caption(f"LLM: {os.environ.get('LLM_MODEL', 'claude-sonnet-4-6')} (yui.cool)")
     st.divider()
-    use_qdrant = st.checkbox("Qdrant 语义搜索", value=True)
-    use_sourcebot = st.checkbox("Sourcebot 精确搜索", value=True)
+    use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
+    use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
 
 # === 搜索后端 ===
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
