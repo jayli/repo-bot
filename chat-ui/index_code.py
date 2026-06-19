@@ -75,7 +75,7 @@ points, done, i = [], 0, 0
 while i < len(text_batch):
     cur_texts, cur_meta = [], []
     cur_len = 0
-    while i < len(text_batch) and len(cur_texts) < 20 and cur_len + len(text_batch[i]) < MAX_TOKENS_PER_BATCH:
+    while i < len(text_batch) and len(cur_texts) < 10 and cur_len + len(text_batch[i]) < MAX_TOKENS_PER_BATCH:
         cur_texts.append(text_batch[i])
         cur_meta.append(chunks_batch[i])
         cur_len += len(text_batch[i])

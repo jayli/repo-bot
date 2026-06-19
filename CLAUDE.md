@@ -58,5 +58,5 @@ REPOS_ROOT (只读挂载 :ro)
 - **容器内 SSL**：yui.cool 自签证书 → `chat-ui/app.py` 里 `httpx.Client(verify=False)`。
 - **ThinkingBlock**：DeepSeek 返回推理块无 `.text` 属性 → `ask_llm` 遍历 `resp.content` 找有 `.text` 的 block。
 - **Qdrant API**：新版 qdrant-client 用 `client.query_points(collection, query=vector, limit=n)`，返回 `.points`。
-- **DashScope 限制**：单次请求 ≤ 20 条、总字符 ≤ ~33000 → `index_code.py` 动态分批 + 单条截断 2000 字符。
+- **DashScope 限制**：单次请求 ≤ 10 条、总字符 ≤ ~33000 → `index_code.py` 动态分批 + 单条截断 2000 字符。
 - **容器内路径**：代码仓库在容器内挂载为 `/repos`，通过 `REPOS_ROOT` 环境变量控制，源代码只在宿主机，通过 `REPOS_ROOT` 环境变量指定。
