@@ -75,6 +75,8 @@ with st.sidebar:
     st.divider()
     use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
     use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
+    use_ast = st.checkbox("AST 结构检索", value=True)
+    st.caption(f"AST: {os.environ.get('AST_SERVICE_URL', 'http://ast-service:8502')}")
     st.divider()
     st.caption(f"👤 {os.environ.get('CHAT_USERNAME', 'admin')}")
     st.markdown("<a href='?logout=1' style='font-size:14px;'>退出登录</a>", unsafe_allow_html=True)
@@ -142,6 +144,55 @@ def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
     ranked = sorted(scores.items(), key=lambda x: -x[1])[:top_k]
     return [all_r[k] for k, _ in ranked]
 
+def candidate_symbols(query: str, results: list[dict], limit: int = 8) -> list[str]:
+    import re
+
+    names: list[str] = []
+    pattern = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\b")
+    for text in [query] + [r.get("content", "") for r in results]:
+        for match in pattern.findall(text or ""):
+            if len(match) < 3:
+                continue
+            if match in {"the", "and", "for", "return", "class", "function", "def"}:
+                continue
+            if match not in names:
+                names.append(match)
+            if len(names) >= limit:
+                return names
+    return names
+
+
+def search_ast_structure(query: str, results: list[dict], limit: int = 8) -> list[str]:
+    import requests
+
+    url = os.environ.get("AST_SERVICE_URL", "http://ast-service:8502").rstrip("/")
+    symbols = candidate_symbols(query, results, limit=limit)
+    facts: list[str] = []
+    seen: set[str] = set()
+    for name in symbols:
+        repos = [r.get("repo") for r in results if r.get("repo")]
+        repos = list(dict.fromkeys(repos))[:3] or [None]
+        for repo in repos:
+            params = {"callee_name": name, "limit": 5}
+            if repo:
+                params["repo"] = repo
+            try:
+                resp = requests.get(f"{url}/calls", params=params, timeout=3)
+                resp.raise_for_status()
+                for call in resp.json().get("calls", []):
+                    fact = (
+                        f"[structure] {name} called at "
+                        f"{call.get('repo')}/{call.get('path')}:L{call.get('call_line')}"
+                    )
+                    if fact not in seen:
+                        seen.add(fact)
+                        facts.append(fact)
+                    if len(facts) >= limit:
+                        return facts
+            except Exception:
+                continue
+    return facts
+
 @st.cache_data(ttl=600)
 def ask_llm(question: str, ctx_json: str) -> str:
     import anthropic, httpx
@@ -203,17 +254,33 @@ if prompt := st.chat_input("输入你的问题..."):
                     r["repo"], r["path"],
                     r.get("start_line", 1), r.get("end_line", r.get("start_line", 1) + 30))
 
+        ast_facts = search_ast_structure(prompt, merged) if use_ast else []
+
         with st.expander(f"📎 检索到 {len(merged)} 条 ({len(src)} Sourcebot + {len(qdr)} Qdrant)", expanded=False):
             for r in merged:
                 st.caption(f"[{r['source']}] `{r['repo']}/{r['path']}:{r['line']}` (score: {r.get('score','-')})")
                 if r.get("content"):
                     st.code(r["content"][:2000], language=r.get("language", ""))
 
+        if ast_facts:
+            with st.expander(f"结构上下文 {len(ast_facts)} 条", expanded=False):
+                for fact in ast_facts:
+                    st.caption(fact)
+
         with st.spinner("LLM 思考中..."):
-            ctx_json = json.dumps([{
+            ctx_items = [{
                 "repo": r["repo"], "path": r["path"], "line": r["line"],
                 "language": r.get("language", ""), "content": r.get("content", ""),
-            } for r in merged])
+            } for r in merged]
+            if ast_facts:
+                ctx_items.append({
+                    "repo": "ast-service",
+                    "path": "structure",
+                    "line": "",
+                    "language": "text",
+                    "content": "\n".join(ast_facts),
+                })
+            ctx_json = json.dumps(ctx_items)
             answer = ask_llm(prompt, ctx_json)
         st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})

@@ -1,0 +1,4 @@
+id: ts-imports
+language: TypeScript
+rule:
+  pattern: import $$$IMPORTS from $MODULE

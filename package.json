@@ -15,6 +15,9 @@
     "open": "open http://localhost:8501",
     "open:sourcebot": "open http://localhost:3000",
     "open:qdrant": "open http://localhost:6333/dashboard",
+    "index:ast": "docker exec repo-bot-ast-service-1 python /app/indexer.py --mode full",
+    "index:ast:incr": "docker exec repo-bot-ast-service-1 python /app/indexer.py --mode incremental",
+    "open:ast": "open http://localhost:8502/docs",
     "clean": "docker image prune -f"
   }
 }

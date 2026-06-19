@@ -1,0 +1,8 @@
+id: python-functions
+language: Python
+metadata:
+  entity_kind: function
+rule:
+  pattern: |
+    def $NAME($$$PARAMS):
+        $$$BODY

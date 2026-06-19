@@ -40,11 +40,26 @@ services:
       - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
       - CHAT_USERNAME=${CHAT_USERNAME:-admin}
       - CHAT_PASSWORD=${CHAT_PASSWORD:-admin123}
+      - AST_SERVICE_URL=http://ast-service:8502
     depends_on:
       - qdrant
       - sourcebot
+      - ast-service
+    restart: unless-stopped
+
+  ast-service:
+    build: ./ast-service
+    ports:
+      - "8502:8502"
+    volumes:
+      - ${REPOS_ROOT:-~/projects}:/repos:ro
+      - ast_data:/data
+    environment:
+      - REPOS_ROOT=/repos
+      - AST_DB_PATH=/data/ast.sqlite
     restart: unless-stopped
 
 volumes:
   sourcebot_data:
   qdrant_data:
+  ast_data:

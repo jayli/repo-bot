@@ -1,0 +1,9 @@
+id: ts-classes
+language: TypeScript
+metadata:
+  entity_kind: class
+rule:
+  pattern: |
+    class $NAME {
+      $$$BODY
+    }

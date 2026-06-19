@@ -1,0 +1,6 @@
+id: python-imports
+language: Python
+rule:
+  any:
+    - pattern: import $MODULE
+    - pattern: from $MODULE import $$$NAMES

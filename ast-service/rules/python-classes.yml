@@ -1,0 +1,8 @@
+id: python-classes
+language: Python
+metadata:
+  entity_kind: class
+rule:
+  pattern: |
+    class $NAME:
+        $$$BODY

@@ -1,0 +1,9 @@
+id: ts-functions
+language: TypeScript
+metadata:
+  entity_kind: function
+rule:
+  pattern: |
+    function $NAME($$$PARAMS) {
+      $$$BODY
+    }

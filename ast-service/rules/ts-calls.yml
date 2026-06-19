@@ -1,0 +1,4 @@
+id: ts-calls
+language: TypeScript
+rule:
+  pattern: $CALLEE($$$ARGS)
