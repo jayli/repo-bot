@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an `ast-service` that runs offline ast-grep scans over repositories, stores symbols/calls/imports in SQLite, exposes FastAPI query endpoints, and lets Chat UI enrich answers with structural context.
+**Goal:** Build an `ast-service` that runs offline ast-grep scans over repositories, stores SCIP-compatible structure plus convenience symbols/calls/imports in SQLite, exposes FastAPI query/export endpoints, and lets Chat UI enrich answers with structural context.
 
-**Architecture:** Add an independent Dockerized FastAPI service beside Sourcebot, Qdrant, and Chat UI. The service uses ast-grep YAML rules for extraction, SQLite for persistence, and bounded APIs for indexing, querying, and realtime pattern search. Chat UI calls the service optionally after Qdrant/Sourcebot fusion and degrades cleanly if unavailable.
+**Architecture:** Add an independent Dockerized FastAPI service beside Sourcebot, Qdrant, and Chat UI. The service uses ast-grep YAML rules for extraction, normalizes matches into SCIP-style documents/occurrences/symbols/relationships plus convenience tables, persists everything in SQLite, and exposes bounded APIs for indexing, querying, SCIP export, and realtime pattern search. Chat UI calls the service optionally after Qdrant/Sourcebot fusion and degrades cleanly if unavailable.
 
-**Tech Stack:** Python 3.12, FastAPI, uvicorn, SQLite, pydantic, ast-grep-py, PyYAML, requests, Docker Compose, Streamlit.
+**Tech Stack:** Python 3.12, FastAPI, uvicorn, SQLite, pydantic, ast-grep-py, PyYAML, protobuf, requests, Docker Compose, Streamlit.
 
 ---
 
@@ -24,6 +24,8 @@ Important constraints:
 - Do not write a custom rule DSL.
 - Primary path is offline preprocessing into SQLite.
 - Online chat should query SQLite through `ast-service`, not scan all repos.
+- Keep SQLite as the local source of truth, but make its core rows mappable to SCIP `Index`, `Document`, `Occurrence`, `SymbolInformation`, and `Relationship`.
+- Use stable SCIP symbols, 0-based ranges, symbol roles, and declared position encoding.
 
 ## Target File Structure
 
@@ -40,6 +42,10 @@ ast-service/
 ├── astgrep_runner.py
 ├── repository_scanner.py
 ├── normalizer.py
+├── scip.py
+├── scip_proto/
+│   ├── __init__.py
+│   └── scip_pb2.py
 ├── rules/
 │   ├── python-symbols.yml
 │   ├── python-calls.yml
@@ -56,6 +62,7 @@ ast-service/
     ├── test_db.py
     ├── test_repository_scanner.py
     ├── test_normalizer.py
+    ├── test_scip.py
     ├── test_indexer.py
     └── test_api.py
 ```
@@ -77,6 +84,8 @@ Responsibilities:
 - `repository_scanner.py`: repository discovery and source file filtering.
 - `astgrep_runner.py`: ast-grep-py wrapper and YAML rule loading. Keep this isolated so CLI fallback can be added later.
 - `normalizer.py`: convert ast-grep match/capture output into database records.
+- `scip.py`: build SCIP symbols, ranges, roles, symbol information, relationships, and export payloads.
+- `scip_proto/`: generated Python protobuf bindings from the official SCIP `scip.proto`.
 - `indexer.py`: full/incremental offline indexing.
 - `main.py`: FastAPI routes.
 - `rules/*.yml`: ast-grep official YAML rules.
@@ -101,6 +110,7 @@ uvicorn[standard]>=0.30
 pydantic>=2.7
 PyYAML>=6.0
 ast-grep-py>=0.35
+protobuf>=5.0
 pytest>=8.0
 httpx>=0.27
 ```
@@ -245,6 +255,10 @@ def test_init_db_creates_expected_tables(tmp_path):
         "repositories",
         "index_runs",
         "files",
+        "scip_documents",
+        "scip_symbols",
+        "scip_occurrences",
+        "scip_relationships",
         "symbols",
         "calls",
         "imports",
@@ -338,10 +352,58 @@ CREATE TABLE IF NOT EXISTS files (
   UNIQUE(repo, path)
 );
 
+CREATE TABLE IF NOT EXISTS scip_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  language TEXT,
+  position_encoding TEXT NOT NULL DEFAULT 'UTF8',
+  UNIQUE(file_id)
+);
+
+CREATE TABLE IF NOT EXISTS scip_symbols (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  scip_symbol TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  kind TEXT,
+  documentation TEXT,
+  signature_documentation TEXT,
+  enclosing_symbol TEXT,
+  UNIQUE(repo, scip_symbol)
+);
+
+CREATE TABLE IF NOT EXISTS scip_occurrences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES scip_documents(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  scip_symbol TEXT NOT NULL,
+  range_start_line INTEGER NOT NULL,
+  range_start_character INTEGER NOT NULL,
+  range_end_line INTEGER NOT NULL,
+  range_end_character INTEGER NOT NULL,
+  symbol_roles INTEGER NOT NULL DEFAULT 0,
+  syntax_kind TEXT,
+  enclosing_range_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scip_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  source_symbol TEXT NOT NULL,
+  target_symbol TEXT NOT NULL,
+  is_reference INTEGER NOT NULL DEFAULT 0,
+  is_implementation INTEGER NOT NULL DEFAULT 0,
+  is_type_definition INTEGER NOT NULL DEFAULT 0,
+  is_definition INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   repo TEXT NOT NULL,
+  scip_symbol TEXT,
   name TEXT NOT NULL,
   qualified_name TEXT,
   kind TEXT NOT NULL,
@@ -356,8 +418,10 @@ CREATE TABLE IF NOT EXISTS calls (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   repo TEXT NOT NULL,
   caller_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+  caller_scip_symbol TEXT,
   callee_name TEXT NOT NULL,
   callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+  callee_scip_symbol TEXT,
   call_line INTEGER NOT NULL
 );
 
@@ -372,6 +436,11 @@ CREATE TABLE IF NOT EXISTS imports (
 
 CREATE INDEX IF NOT EXISTS idx_files_repo_path ON files(repo, path);
 CREATE INDEX IF NOT EXISTS idx_files_repo_hash ON files(repo, content_hash);
+CREATE INDEX IF NOT EXISTS idx_scip_documents_repo_path ON scip_documents(repo, relative_path);
+CREATE INDEX IF NOT EXISTS idx_scip_symbols_repo_symbol ON scip_symbols(repo, scip_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_occurrences_symbol ON scip_occurrences(repo, scip_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_relationships_source ON scip_relationships(repo, source_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_relationships_target ON scip_relationships(repo, target_symbol);
 CREATE INDEX IF NOT EXISTS idx_symbols_repo_name ON symbols(repo, name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(repo, qualified_name);
 CREATE INDEX IF NOT EXISTS idx_calls_repo_callee ON calls(repo, callee_name);
@@ -1116,7 +1185,304 @@ git add ast-service/normalizer.py ast-service/tests/test_normalizer.py
 git commit -m "feat(ast-service): normalize ast-grep matches"
 ```
 
-## Task 6: Implement Offline Indexer
+## Task 6: Add SCIP Compatibility Layer
+
+**Files:**
+- Create: `ast-service/scip.py`
+- Create: `ast-service/tests/test_scip.py`
+- Modify: `ast-service/db.py`
+
+- [ ] **Step 1: Write SCIP mapping tests**
+
+Create `ast-service/tests/test_scip.py`:
+
+```python
+from normalizer import SymbolRecord
+from scip import (
+    DEFINITION_ROLE,
+    Position,
+    make_document_uri,
+    make_occurrence_range,
+    make_scip_symbol,
+    symbol_to_scip_rows,
+)
+
+
+def test_make_scip_symbol_is_stable_and_repo_local():
+    symbol = make_scip_symbol(
+        repo="repo-bot",
+        path="repo-bot/chat-ui/app.py",
+        descriptor_chain=["search_qdrant()"],
+    )
+
+    assert symbol == "local repo-bot repo-bot/chat-ui/app.py / search_qdrant()."
+
+
+def test_make_occurrence_range_is_zero_based():
+    source = "def foo():\n    return 1\n"
+    start = source.index("foo")
+    end = start + len("foo")
+
+    assert make_occurrence_range(source, start, end) == Position(0, 4, 0, 7)
+
+
+def test_symbol_to_scip_rows_maps_definition_role():
+    symbol = SymbolRecord(
+        repo="repo-bot",
+        path="repo-bot/app.py",
+        name="foo",
+        qualified_name="foo",
+        kind="function",
+        start_line=1,
+        end_line=2,
+    )
+
+    scip_symbol, occurrence = symbol_to_scip_rows(
+        symbol=symbol,
+        document_id=1,
+        source_text="def foo():\n    pass\n",
+    )
+
+    assert scip_symbol.scip_symbol.endswith("foo().")
+    assert occurrence.symbol_roles & DEFINITION_ROLE
+```
+
+- [ ] **Step 2: Run tests to verify failure**
+
+Run:
+
+```bash
+cd ast-service && pytest tests/test_scip.py -v
+```
+
+Expected: fail because `scip.py` does not exist.
+
+- [ ] **Step 3: Implement SCIP helpers**
+
+Create `ast-service/scip.py`:
+
+```python
+from dataclasses import dataclass
+
+from normalizer import SymbolRecord
+
+
+# SCIP SymbolRole bit values. Keep these isolated so they can be checked
+# against scip.proto when protobuf export is implemented.
+DEFINITION_ROLE = 1
+IMPORT_ROLE = 2
+READ_ACCESS_ROLE = 4
+WRITE_ACCESS_ROLE = 8
+
+
+@dataclass(frozen=True)
+class Position:
+    start_line: int
+    start_character: int
+    end_line: int
+    end_character: int
+
+
+@dataclass(frozen=True)
+class ScipSymbolRow:
+    repo: str
+    scip_symbol: str
+    display_name: str
+    kind: str
+    documentation: str | None = None
+    signature_documentation: str | None = None
+    enclosing_symbol: str | None = None
+
+
+@dataclass(frozen=True)
+class ScipOccurrenceRow:
+    document_id: int
+    repo: str
+    scip_symbol: str
+    range_start_line: int
+    range_start_character: int
+    range_end_line: int
+    range_end_character: int
+    symbol_roles: int
+    syntax_kind: str | None = None
+    enclosing_range_json: str | None = None
+
+
+def make_document_uri(repo: str, path: str) -> str:
+    return path if path.startswith(f"{repo}/") else f"{repo}/{path}"
+
+
+def descriptor_for_symbol(symbol: SymbolRecord) -> str:
+    suffix = "#" if symbol.kind == "class" else "()"
+    return f"{symbol.qualified_name or symbol.name}{suffix}"
+
+
+def make_scip_symbol(repo: str, path: str, descriptor_chain: list[str]) -> str:
+    descriptors = " ".join(descriptor_chain)
+    return f"local {repo} {path} / {descriptors}."
+
+
+def make_occurrence_range(source_text: str, start_offset: int, end_offset: int) -> Position:
+    before_start = source_text[:start_offset]
+    before_end = source_text[:end_offset]
+    start_line = before_start.count("\n")
+    end_line = before_end.count("\n")
+    start_line_start = before_start.rfind("\n") + 1
+    end_line_start = before_end.rfind("\n") + 1
+    return Position(
+        start_line=start_line,
+        start_character=start_offset - start_line_start,
+        end_line=end_line,
+        end_character=end_offset - end_line_start,
+    )
+
+
+def symbol_to_scip_rows(
+    symbol: SymbolRecord,
+    document_id: int,
+    source_text: str,
+) -> tuple[ScipSymbolRow, ScipOccurrenceRow]:
+    descriptor = descriptor_for_symbol(symbol)
+    scip_symbol = make_scip_symbol(symbol.repo, symbol.path, [descriptor])
+    name_offset = source_text.find(symbol.name)
+    if name_offset < 0:
+        name_offset = 0
+    position = make_occurrence_range(source_text, name_offset, name_offset + len(symbol.name))
+    return (
+        ScipSymbolRow(
+            repo=symbol.repo,
+            scip_symbol=scip_symbol,
+            display_name=symbol.name,
+            kind=symbol.kind,
+            signature_documentation=symbol.signature,
+            enclosing_symbol=symbol.parent_name,
+        ),
+        ScipOccurrenceRow(
+            document_id=document_id,
+            repo=symbol.repo,
+            scip_symbol=scip_symbol,
+            range_start_line=position.start_line,
+            range_start_character=position.start_character,
+            range_end_line=position.end_line,
+            range_end_character=position.end_character,
+            symbol_roles=DEFINITION_ROLE,
+            syntax_kind=symbol.kind,
+        ),
+    )
+```
+
+- [ ] **Step 4: Add DB helpers for SCIP rows**
+
+Extend `ast-service/db.py` with:
+
+```python
+from scip import ScipOccurrenceRow, ScipSymbolRow
+
+
+def upsert_scip_document(
+    conn: sqlite3.Connection,
+    file_id: int,
+    repo: str,
+    relative_path: str,
+    language: str,
+    position_encoding: str = "UTF8",
+) -> int:
+    conn.execute(
+        """
+        INSERT INTO scip_documents(file_id, repo, relative_path, language, position_encoding)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(file_id) DO UPDATE SET
+          repo = excluded.repo,
+          relative_path = excluded.relative_path,
+          language = excluded.language,
+          position_encoding = excluded.position_encoding
+        """,
+        (file_id, repo, relative_path, language, position_encoding),
+    )
+    row = conn.execute(
+        "SELECT id FROM scip_documents WHERE file_id = ?",
+        (file_id,),
+    ).fetchone()
+    return int(row["id"])
+
+
+def replace_scip_records(
+    conn: sqlite3.Connection,
+    document_id: int,
+    repo: str,
+    symbols: list[ScipSymbolRow],
+    occurrences: list[ScipOccurrenceRow],
+) -> tuple[int, int]:
+    conn.execute("DELETE FROM scip_occurrences WHERE document_id = ?", (document_id,))
+    for symbol in symbols:
+        conn.execute(
+            """
+            INSERT INTO scip_symbols(
+              repo, scip_symbol, display_name, kind, documentation,
+              signature_documentation, enclosing_symbol
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(repo, scip_symbol) DO UPDATE SET
+              display_name = excluded.display_name,
+              kind = excluded.kind,
+              documentation = excluded.documentation,
+              signature_documentation = excluded.signature_documentation,
+              enclosing_symbol = excluded.enclosing_symbol
+            """,
+            (
+                symbol.repo,
+                symbol.scip_symbol,
+                symbol.display_name,
+                symbol.kind,
+                symbol.documentation,
+                symbol.signature_documentation,
+                symbol.enclosing_symbol,
+            ),
+        )
+    for occurrence in occurrences:
+        conn.execute(
+            """
+            INSERT INTO scip_occurrences(
+              document_id, repo, scip_symbol, range_start_line,
+              range_start_character, range_end_line, range_end_character,
+              symbol_roles, syntax_kind, enclosing_range_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                occurrence.document_id,
+                occurrence.repo,
+                occurrence.scip_symbol,
+                occurrence.range_start_line,
+                occurrence.range_start_character,
+                occurrence.range_end_line,
+                occurrence.range_end_character,
+                occurrence.symbol_roles,
+                occurrence.syntax_kind,
+                occurrence.enclosing_range_json,
+            ),
+        )
+    return len(symbols), len(occurrences)
+```
+
+- [ ] **Step 5: Run SCIP tests**
+
+Run:
+
+```bash
+cd ast-service && pytest tests/test_scip.py tests/test_db.py -v
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add ast-service/scip.py ast-service/tests/test_scip.py ast-service/db.py
+git commit -m "feat(ast-service): add SCIP compatibility layer"
+```
+
+## Task 7: Implement Offline Indexer
 
 **Files:**
 - Create: `ast-service/indexer.py`
@@ -1161,6 +1527,9 @@ def test_full_index_writes_symbols_calls_and_imports(tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] >= 3
     assert conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0] >= 2
     assert conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0] >= 2
+    assert conn.execute("SELECT COUNT(*) FROM scip_documents").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM scip_symbols").fetchone()[0] >= 3
+    assert conn.execute("SELECT COUNT(*) FROM scip_occurrences").fetchone()[0] >= 3
 ```
 
 - [ ] **Step 2: Run test to verify failure**
@@ -1290,12 +1659,15 @@ from db import (
     finish_index_run,
     init_db,
     replace_file_records,
+    replace_scip_records,
     start_index_run,
     transaction,
     upsert_file,
+    upsert_scip_document,
 )
 from normalizer import normalize_calls, normalize_imports, normalize_symbols
 from repository_scanner import SourceFile, discover_source_files
+from scip import symbol_to_scip_rows
 
 
 RULES_BY_LANGUAGE = {
@@ -1374,6 +1746,15 @@ def index_one_file(conn, source: SourceFile) -> tuple[int, int, int]:
     symbols = normalize_symbols(source.repo, source.rel_path, source.language, symbol_matches)
     calls = normalize_calls(source.repo, source.rel_path, call_matches)
     imports = normalize_imports(source.repo, source.rel_path, source.language, import_matches)
+    document_id = upsert_scip_document(conn, file_id, source.repo, source.rel_path, source.language)
+    source_text = source.abs_path.read_text(encoding="utf-8", errors="replace")
+    scip_symbols = []
+    scip_occurrences = []
+    for symbol in symbols:
+        scip_symbol, scip_occurrence = symbol_to_scip_rows(symbol, document_id, source_text)
+        scip_symbols.append(scip_symbol)
+        scip_occurrences.append(scip_occurrence)
+    replace_scip_records(conn, document_id, source.repo, scip_symbols, scip_occurrences)
     return replace_file_records(conn, file_id, source.repo, symbols, calls, imports)
 
 
@@ -1449,7 +1830,7 @@ git add ast-service
 git commit -m "feat(ast-service): add offline indexer"
 ```
 
-## Task 7: Add Query APIs
+## Task 8: Add Query APIs
 
 **Files:**
 - Modify: `ast-service/db.py`
@@ -1481,6 +1862,13 @@ def test_imports_endpoint_returns_list():
     resp = client.get("/imports?repo=missing&module=fastapi&limit=10")
     assert resp.status_code == 200
     assert resp.json() == {"imports": []}
+
+
+def test_scip_debug_endpoints_return_lists():
+    client = TestClient(app)
+    assert client.get("/scip/documents?repo=missing").json() == {"documents": []}
+    assert client.get("/scip/symbols?repo=missing").json() == {"symbols": []}
+    assert client.get("/scip/occurrences?repo=missing").json() == {"occurrences": []}
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -1547,6 +1935,18 @@ class ImportsResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     latest_runs: list[dict[str, Any]]
+
+
+class ScipDocumentsResponse(BaseModel):
+    documents: list[dict[str, Any]]
+
+
+class ScipSymbolsResponse(BaseModel):
+    symbols: list[dict[str, Any]]
+
+
+class ScipOccurrencesResponse(BaseModel):
+    occurrences: list[dict[str, Any]]
 ```
 
 - [ ] **Step 4: Add DB query helpers**
@@ -1633,6 +2033,55 @@ def query_imports(
     sql += " ORDER BY imports.repo, files.path, imports.import_line LIMIT ?"
     params.append(limit)
     return conn.execute(sql, params).fetchall()
+
+
+def query_scip_documents(conn: sqlite3.Connection, repo: str | None, limit: int) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM scip_documents WHERE 1 = 1"
+    params: list[object] = []
+    if repo:
+        sql += " AND repo = ?"
+        params.append(repo)
+    sql += " ORDER BY repo, relative_path LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def query_scip_symbols(
+    conn: sqlite3.Connection,
+    repo: str | None,
+    prefix: str | None,
+    limit: int,
+) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM scip_symbols WHERE 1 = 1"
+    params: list[object] = []
+    if repo:
+        sql += " AND repo = ?"
+        params.append(repo)
+    if prefix:
+        sql += " AND scip_symbol LIKE ?"
+        params.append(f"{prefix}%")
+    sql += " ORDER BY repo, scip_symbol LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def query_scip_occurrences(
+    conn: sqlite3.Connection,
+    repo: str | None,
+    symbol: str | None,
+    limit: int,
+) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM scip_occurrences WHERE 1 = 1"
+    params: list[object] = []
+    if repo:
+        sql += " AND repo = ?"
+        params.append(repo)
+    if symbol:
+        sql += " AND scip_symbol = ?"
+        params.append(symbol)
+    sql += " ORDER BY repo, document_id, range_start_line, range_start_character LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
 ```
 
 - [ ] **Step 5: Add FastAPI routes**
@@ -1642,11 +2091,23 @@ Modify `ast-service/main.py`:
 ```python
 from fastapi import FastAPI, Query
 
-from db import connect_db, init_db, query_calls, query_imports, query_symbols
+from db import (
+    connect_db,
+    init_db,
+    query_calls,
+    query_imports,
+    query_scip_documents,
+    query_scip_occurrences,
+    query_scip_symbols,
+    query_symbols,
+)
 from models import (
     CallsResponse,
     HealthResponse,
     ImportsResponse,
+    ScipDocumentsResponse,
+    ScipOccurrencesResponse,
+    ScipSymbolsResponse,
     SymbolsResponse,
 )
 
@@ -1708,6 +2169,44 @@ def imports(
         return ImportsResponse(imports=[dict(row) for row in rows])
     finally:
         conn.close()
+
+
+@app.get("/scip/documents", response_model=ScipDocumentsResponse)
+def scip_documents(repo: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> ScipDocumentsResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_documents(conn, repo, limit)
+        return ScipDocumentsResponse(documents=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/scip/symbols", response_model=ScipSymbolsResponse)
+def scip_symbols(
+    repo: str | None = None,
+    prefix: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ScipSymbolsResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_symbols(conn, repo, prefix, limit)
+        return ScipSymbolsResponse(symbols=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/scip/occurrences", response_model=ScipOccurrencesResponse)
+def scip_occurrences(
+    repo: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ScipOccurrencesResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_occurrences(conn, repo, symbol, limit)
+        return ScipOccurrencesResponse(occurrences=[dict(row) for row in rows])
+    finally:
+        conn.close()
 ```
 
 - [ ] **Step 6: Run API tests**
@@ -1727,9 +2226,12 @@ git add ast-service
 git commit -m "feat(ast-service): add structure query APIs"
 ```
 
-## Task 8: Add Index and Search APIs
+## Task 9: Add Index, SCIP Export, and Search APIs
 
 **Files:**
+- Create: `ast-service/scip_proto/__init__.py`
+- Create: `ast-service/scip_proto/scip_pb2.py`
+- Modify: `ast-service/scip.py`
 - Modify: `ast-service/main.py`
 - Modify: `ast-service/models.py`
 - Modify: `ast-service/tests/test_api.py`
@@ -1751,13 +2253,25 @@ def test_search_requires_bounded_limit():
         },
     )
     assert resp.status_code == 422
+
+
+def test_scip_export_json_returns_index_shape():
+    client = TestClient(app)
+    resp = client.get("/scip/export.json?repo=missing")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["metadata"]["tool_info"]["name"] == "repo-bot ast-service"
+    assert data["documents"] == []
 ```
 
-- [ ] **Step 2: Extend models for search response**
+- [ ] **Step 2: Extend models for search and SCIP export responses**
 
 Extend `ast-service/models.py`:
 
 ```python
+from typing import Any
+
+
 class SearchMatch(BaseModel):
     repo: str
     path: str
@@ -1768,15 +2282,111 @@ class SearchMatch(BaseModel):
 
 class SearchResponse(BaseModel):
     matches: list[SearchMatch]
+
+
+class ScipExportJsonResponse(BaseModel):
+    metadata: dict[str, Any]
+    documents: list[dict[str, Any]]
 ```
 
-- [ ] **Step 3: Add `/index` and `/search` routes**
+- [ ] **Step 3: Add SCIP export helpers**
+
+Add generated protobuf bindings:
+
+```text
+ast-service/scip_proto/__init__.py
+ast-service/scip_proto/scip_pb2.py
+```
+
+Generate `scip_pb2.py` from the official SCIP `scip.proto`. Keep the generated file isolated under `ast-service/scip_proto/` and do not hand-edit generated protobuf code.
+
+Extend `ast-service/scip.py`:
+
+```python
+def build_scip_export_json(conn, repo: str) -> dict:
+    documents = conn.execute(
+        "SELECT * FROM scip_documents WHERE repo = ? ORDER BY relative_path",
+        (repo,),
+    ).fetchall()
+    payload_documents = []
+    for document in documents:
+        occurrences = conn.execute(
+            """
+            SELECT * FROM scip_occurrences
+            WHERE document_id = ?
+            ORDER BY range_start_line, range_start_character
+            """,
+            (document["id"],),
+        ).fetchall()
+        payload_documents.append(
+            {
+                "relative_path": document["relative_path"],
+                "language": document["language"],
+                "position_encoding": document["position_encoding"],
+                "occurrences": [dict(row) for row in occurrences],
+            }
+        )
+    return {
+        "metadata": {
+            "version": "0.1",
+            "tool_info": {"name": "repo-bot ast-service"},
+            "project_root": repo,
+        },
+        "documents": payload_documents,
+    }
+
+
+def build_scip_export_protobuf(conn, repo: str) -> bytes:
+    # Use generated classes from the official scip.proto, isolated under
+    # ast-service/scip_proto/. The exact import path depends on the generation
+    # command used by the worker.
+    from scip_proto import scip_pb2
+
+    debug_payload = build_scip_export_json(conn, repo)
+    index = scip_pb2.Index()
+    index.metadata.version = scip_pb2.ProtocolVersion.UnspecifiedProtocolVersion
+    index.metadata.tool_info.name = "repo-bot ast-service"
+    index.metadata.project_root = repo
+
+    for document_payload in debug_payload["documents"]:
+        document = index.documents.add()
+        document.relative_path = document_payload["relative_path"]
+        document.language = document_payload["language"] or ""
+        document.position_encoding = scip_pb2.PositionEncoding.UTF8
+        for item in document_payload["occurrences"]:
+            occurrence = document.occurrences.add()
+            occurrence.symbol = item["scip_symbol"]
+            occurrence.range.extend([
+                item["range_start_line"],
+                item["range_start_character"],
+                item["range_end_line"],
+                item["range_end_character"],
+            ])
+            occurrence.symbol_roles = item["symbol_roles"]
+
+    for row in conn.execute(
+        "SELECT * FROM scip_symbols WHERE repo = ? ORDER BY scip_symbol",
+        (repo,),
+    ).fetchall():
+        info = index.external_symbols.add()
+        info.symbol = row["scip_symbol"]
+        info.display_name = row["display_name"]
+        info.documentation.append(row["documentation"] or "")
+
+    return index.SerializeToString()
+```
+
+Note: this JSON is a debug view shaped after SCIP concepts. The protobuf `.scip` endpoint is the compatibility target and must be implemented before Task 9 is complete.
+
+- [ ] **Step 4: Add `/index`, `/scip/export.json`, `/scip/export`, and `/search` routes**
 
 Modify `ast-service/main.py`:
 
 ```python
+from fastapi.responses import Response
 from indexer import run_index
-from models import IndexRequest, IndexResponse, SearchRequest, SearchResponse
+from models import IndexRequest, IndexResponse, ScipExportJsonResponse, SearchRequest, SearchResponse
+from scip import build_scip_export_json, build_scip_export_protobuf
 
 
 @app.post("/index", response_model=IndexResponse)
@@ -1793,6 +2403,29 @@ def index(request: IndexRequest) -> IndexResponse:
     )
 
 
+@app.get("/scip/export.json", response_model=ScipExportJsonResponse)
+def scip_export_json(repo: str) -> ScipExportJsonResponse:
+    conn = connect_db()
+    try:
+        return ScipExportJsonResponse(**build_scip_export_json(conn, repo))
+    finally:
+        conn.close()
+
+
+@app.get("/scip/export")
+def scip_export(repo: str) -> Response:
+    conn = connect_db()
+    try:
+        payload = build_scip_export_protobuf(conn, repo)
+        return Response(
+            content=payload,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{repo}.scip"'},
+        )
+    finally:
+        conn.close()
+
+
 @app.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
     # Implement as a bounded auxiliary path only. It must never scan every repo
@@ -1800,9 +2433,9 @@ def search(request: SearchRequest) -> SearchResponse:
     return SearchResponse(matches=[])
 ```
 
-Note: Task 8 can leave `/search` returning an empty list after validation. Implement actual bounded pattern matching later if needed. The important first step is API shape and limits.
+Note: Task 9 can leave `/search` returning an empty list after validation. `/scip/export` must return a real SCIP protobuf `Index` payload before this task is considered complete. Use the official `scip.proto` as the contract and keep generated protobuf code isolated under `ast-service/scip_proto/` if generation is needed.
 
-- [ ] **Step 4: Run API tests**
+- [ ] **Step 5: Run API tests**
 
 Run:
 
@@ -1812,14 +2445,14 @@ cd ast-service && pytest tests/test_api.py -v
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add ast-service
 git commit -m "feat(ast-service): add indexing API"
 ```
 
-## Task 9: Add Docker Compose, npm, and Environment Integration
+## Task 10: Add Docker Compose, npm, and Environment Integration
 
 **Files:**
 - Modify: `docker-compose.yml`
@@ -1905,7 +2538,7 @@ git add docker-compose.yml package.json .env.example README.md
 git commit -m "build(ast-service): add compose and npm integration"
 ```
 
-## Task 10: Integrate Chat UI Structural Context
+## Task 11: Integrate Chat UI Structural Context
 
 **Files:**
 - Modify: `chat-ui/app.py`
@@ -2034,7 +2667,7 @@ git add chat-ui/app.py
 git commit -m "feat(chat-ui): enrich answers with AST structure"
 ```
 
-## Task 11: End-to-End Verification
+## Task 12: End-to-End Verification
 
 **Files:**
 - No source changes expected unless verification exposes issues.
@@ -2113,7 +2746,28 @@ curl -fsSL "http://localhost:8502/calls?repo=repo-bot&limit=10"
 
 Expected: JSON response with a `calls` array.
 
-- [ ] **Step 8: Verify Chat UI still loads**
+- [ ] **Step 8: Verify SCIP debug export**
+
+Run:
+
+```bash
+curl -fsSL "http://localhost:8502/scip/export.json?repo=repo-bot"
+```
+
+Expected: JSON response with `metadata` and `documents`.
+
+- [ ] **Step 9: Verify SCIP protobuf export**
+
+Run:
+
+```bash
+curl -fsSL "http://localhost:8502/scip/export?repo=repo-bot" -o /tmp/repo-bot.scip
+test -s /tmp/repo-bot.scip
+```
+
+Expected: command exits 0 and `/tmp/repo-bot.scip` is non-empty.
+
+- [ ] **Step 10: Verify Chat UI still loads**
 
 Open:
 
@@ -2123,7 +2777,7 @@ http://localhost:8501
 
 Expected: Chat UI loads and the sidebar includes AST service information and the `AST 结构检索` checkbox.
 
-- [ ] **Step 9: Commit any verification fixes**
+- [ ] **Step 11: Commit any verification fixes**
 
 If verification required fixes:
 
@@ -2148,7 +2802,11 @@ If the AST integration causes issues:
 - All ast-service tests pass.
 - Docker build succeeds.
 - `/health`, `/symbols`, `/calls`, and `/imports` return valid JSON.
+- `/scip/documents`, `/scip/symbols`, and `/scip/occurrences` return valid JSON.
+- `/scip/export.json` returns SCIP-shaped debug JSON.
+- `/scip/export` returns a non-empty SCIP protobuf payload.
 - `npm run index:ast` performs offline preprocessing into SQLite.
+- Offline indexing writes SCIP documents, occurrences, symbols, and relationships where inferable.
 - Chat UI can include structural facts when AST retrieval is enabled.
 - Chat UI still answers with Qdrant + Sourcebot when `ast-service` is unavailable.
 - No application code directly traverses tree-sitter ASTs.
