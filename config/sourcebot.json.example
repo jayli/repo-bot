@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/sourcebot-dev/sourcebot/main/schemas/v3/index.json",
+  "connections": {
+    "repo-a":  { "type": "git", "url": "file:///repos/repo-a" },
+    "repo-b":  { "type": "git", "url": "file:///repos/repo-b" }
+  }
+}

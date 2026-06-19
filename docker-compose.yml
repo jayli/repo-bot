@@ -5,6 +5,7 @@ services:
       - "3000:3000"
     volumes:
       - ${REPOS_ROOT:-~/projects}:/repos:ro
+      # 首次使用: cp config/sourcebot.json.example config/sourcebot.json
       - ./config/sourcebot.json:/data/config.json:ro
       - sourcebot_data:/data
     environment:
