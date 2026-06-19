@@ -2,9 +2,9 @@
 
 ## Summary
 
-Add an `ast-service` to repo-bot that uses ast-grep to build a persistent, SCIP-compatible structural code index for repositories under `REPOS_ROOT`.
+Add an `ast-service` to repo-bot that uses ast-grep to build a persistent structural code index for repositories under `REPOS_ROOT`, with a planned SCIP-compatible export layer.
 
-The service runs offline preprocessing jobs over many repositories, executes predefined ast-grep YAML rules, stores SCIP-style documents, occurrences, symbols, relationships, and convenience symbols/calls/imports in SQLite, and exposes FastAPI query endpoints. Chat UI can then enrich the existing Qdrant + Sourcebot retrieval flow with structure-aware context.
+The service runs offline preprocessing jobs over many repositories, executes predefined ast-grep YAML rules, stores convenience symbols, calls, and imports in SQLite for Phase 1, and exposes FastAPI query endpoints. Phase 2 adds SCIP-style documents, occurrences, symbols, relationships, and protobuf export. Chat UI can then enrich the existing Qdrant + Sourcebot retrieval flow with structure-aware context without needing to consume SCIP directly.
 
 This design intentionally does not introduce NetworkX or Neo4j. SQLite is the only structural persistence layer for this phase.
 
@@ -17,9 +17,9 @@ References:
 
 - Use ast-grep's official matching model as much as possible.
 - Run offline batch scans across many repositories.
-- Store symbols, calls, and imports in SQLite.
-- Store a SCIP-compatible internal model: documents, occurrences, symbol information, and relationships.
-- Support exporting indexed data to SCIP protobuf format once the core index is stable.
+- Phase 1: store symbols, calls, and imports in SQLite.
+- Phase 2: store a SCIP-compatible internal model: documents, occurrences, symbol information, and relationships.
+- Phase 2: support exporting indexed data to SCIP protobuf format once the core structure index is stable.
 - Expose query APIs for structural lookup.
 - Integrate structural context into the current Chat UI retrieval flow.
 - Keep ast-grep integration optional and degradable so the existing Qdrant + Sourcebot flow remains usable if `ast-service` is unavailable.
@@ -34,9 +34,28 @@ References:
 - Do not promise perfect type-aware call graph resolution in the first phase.
 - Do not require Chat UI to consume SCIP directly. Chat UI should use purpose-built FastAPI query endpoints.
 
+## Phasing
+
+Phase 1 is the default implementation target:
+
+- Build `ast-service`.
+- Run offline ast-grep YAML rule scans.
+- Persist `files`, `symbols`, `calls`, `imports`, and `index_runs`.
+- Expose `/index`, `/symbols`, `/symbols/{id}`, `/calls`, `/imports`, `/status`, and `/runs`.
+- Integrate Chat UI with these convenience query APIs.
+
+Phase 2 adds SCIP compatibility:
+
+- Add `scip_documents`, `scip_symbols`, `scip_occurrences`, and `scip_relationships`.
+- Generate stable SCIP symbols and 0-based ranges.
+- Generate protobuf bindings from official `scip.proto`.
+- Expose SCIP debug and protobuf export endpoints.
+
+This phasing keeps the first useful delivery aligned with the original "rough knowledge association" goal while preserving a standards-compatible path.
+
 ## SCIP Compatibility Target
 
-SCIP is the compatibility format for this design, not the primary Chat UI query API. The SQLite schema should keep enough normalized data to emit SCIP `Index`, `Document`, `Occurrence`, `SymbolInformation`, and `Relationship` records.
+SCIP is the Phase 2 compatibility format, not the primary Chat UI query API. The SQLite schema should keep enough normalized data to emit SCIP `Index`, `Document`, `Occurrence`, `SymbolInformation`, and `Relationship` records when Phase 2 is implemented.
 
 Compatibility requirements:
 
@@ -57,6 +76,16 @@ Relevant SCIP concepts:
 - `Occurrence`: symbol occurrence with range, roles, syntax kind, and optional enclosing range.
 - `SymbolInformation`: metadata for a symbol.
 - `Relationship`: reference, implementation, type-definition, or definition relationship between symbols.
+
+## ast-grep-py API Requirements
+
+The implementation must verify ast-grep-py's exact API shape with tests before relying on it. The runner should:
+
+- Use ast-grep node range APIs for locations. It must not calculate match positions through `source.find(matched_text)`.
+- Use `get_match("NAME")` for single captures such as `$NAME`, `$CALLEE`, and `$MODULE`.
+- Use `get_multiple_matches("ARGS")` only for variadic captures such as `$$$ARGS`.
+- Call `find_all` using the API form supported by the installed ast-grep-py version, for example `find_all(config={"rule": ...})` or `find_all(**rule)`, and isolate this in `astgrep_runner.py`.
+- Return captures and ranges in a stable wrapper so `normalizer.py` never depends on raw ast-grep node objects.
 
 ## Existing Context
 
@@ -130,8 +159,13 @@ Application code should not:
 - Depend on raw tree-sitter AST APIs.
 - Use tree-sitter queries directly.
 - Hard-code extraction through `node.kind`, `field("name")`, or `child(0)` in Python.
+- Re-parse matched source text with regex when the same value is available through ast-grep captures.
 
 tree-sitter remains an internal implementation detail of ast-grep.
+
+The normalizer must consume ast-grep captures such as `$NAME`, `$CALLEE`, and `$MODULE` as the primary extraction source. Light string cleanup is allowed for formatting captured values, but regex should not be the mechanism that identifies symbols, calls, or imports.
+
+Rules should be narrow enough that semantic kind can be derived from rule metadata or rule id. For example, use separate function and class symbol rules instead of one mixed symbol rule that forces Python code to inspect matched source text.
 
 The indexing flow should look like this:
 
@@ -194,10 +228,12 @@ ast-service/
 │   ├── __init__.py
 │   └── scip_pb2.py
 └── rules/
-    ├── python-symbols.yml
+    ├── python-functions.yml
+    ├── python-classes.yml
     ├── python-calls.yml
     ├── python-imports.yml
-    ├── ts-symbols.yml
+    ├── ts-functions.yml
+    ├── ts-classes.yml
     ├── ts-calls.yml
     ├── ts-imports.yml
     └── common.yml
@@ -212,8 +248,8 @@ Responsibilities:
 - `astgrep_runner.py`: ast-grep-py execution wrapper, with room for CLI fallback if needed.
 - `repository_scanner.py`: repository and file discovery under `REPOS_ROOT`.
 - `normalizer.py`: convert ast-grep match/capture output into stable database records.
-- `scip.py`: construct SCIP-compatible symbols, ranges, roles, symbol information, relationships, and export payloads.
-- `scip_proto/`: generated Python protobuf bindings from the official SCIP `scip.proto`.
+- `scip.py`: Phase 2 module for SCIP-compatible symbols, ranges, roles, symbol information, relationships, and export payloads.
+- `scip_proto/`: Phase 2 generated Python protobuf bindings from the official SCIP `scip.proto`.
 - `rules/`: ast-grep YAML rules. Rules should be independently debuggable with ast-grep CLI.
 
 ## Initial Language Scope
@@ -235,7 +271,7 @@ Later candidates:
 
 ## SQLite Schema
 
-Use SQLite as the source of truth for the phase-one structural index.
+Use SQLite as the source of truth. Phase 1 creates only the tables needed for the local structural index and Chat UI enrichment.
 
 ```sql
 CREATE TABLE repositories (
@@ -272,6 +308,54 @@ CREATE TABLE files (
   UNIQUE(repo, path)
 );
 
+CREATE TABLE symbols (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  name TEXT NOT NULL,
+  qualified_name TEXT,
+  kind TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER,
+  signature TEXT,
+  parent_name TEXT
+);
+
+CREATE TABLE calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  caller_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+  callee_name TEXT NOT NULL,
+  callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
+  call_line INTEGER NOT NULL
+);
+
+CREATE TABLE imports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  module_path TEXT NOT NULL,
+  imported_names_json TEXT,
+  import_line INTEGER NOT NULL
+);
+```
+
+Indexes:
+
+```sql
+CREATE INDEX idx_files_repo_path ON files(repo, path);
+CREATE INDEX idx_files_repo_hash ON files(repo, content_hash);
+CREATE INDEX idx_symbols_repo_name ON symbols(repo, name);
+CREATE INDEX idx_symbols_qualified ON symbols(repo, qualified_name);
+CREATE INDEX idx_calls_repo_callee ON calls(repo, callee_name);
+CREATE INDEX idx_calls_repo_caller ON calls(repo, caller_symbol_id);
+CREATE INDEX idx_imports_repo_module ON imports(repo, module_path);
+```
+
+Phase 2 adds SCIP compatibility tables and links:
+
+```sql
 CREATE TABLE scip_documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -319,57 +403,15 @@ CREATE TABLE scip_relationships (
   is_definition INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE symbols (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  repo TEXT NOT NULL,
-  scip_symbol TEXT,
-  name TEXT NOT NULL,
-  qualified_name TEXT,
-  kind TEXT NOT NULL,
-  start_line INTEGER NOT NULL,
-  end_line INTEGER,
-  signature TEXT,
-  parent_name TEXT
-);
+ALTER TABLE symbols ADD COLUMN scip_symbol TEXT;
+ALTER TABLE calls ADD COLUMN caller_scip_symbol TEXT;
+ALTER TABLE calls ADD COLUMN callee_scip_symbol TEXT;
 
-CREATE TABLE calls (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  repo TEXT NOT NULL,
-  caller_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-  caller_scip_symbol TEXT,
-  callee_name TEXT NOT NULL,
-  callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-  callee_scip_symbol TEXT,
-  call_line INTEGER NOT NULL
-);
-
-CREATE TABLE imports (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  repo TEXT NOT NULL,
-  module_path TEXT NOT NULL,
-  imported_names_json TEXT,
-  import_line INTEGER NOT NULL
-);
-```
-
-Indexes:
-
-```sql
-CREATE INDEX idx_files_repo_path ON files(repo, path);
-CREATE INDEX idx_files_repo_hash ON files(repo, content_hash);
 CREATE INDEX idx_scip_documents_repo_path ON scip_documents(repo, relative_path);
 CREATE INDEX idx_scip_symbols_repo_symbol ON scip_symbols(repo, scip_symbol);
 CREATE INDEX idx_scip_occurrences_symbol ON scip_occurrences(repo, scip_symbol);
 CREATE INDEX idx_scip_relationships_source ON scip_relationships(repo, source_symbol);
 CREATE INDEX idx_scip_relationships_target ON scip_relationships(repo, target_symbol);
-CREATE INDEX idx_symbols_repo_name ON symbols(repo, name);
-CREATE INDEX idx_symbols_qualified ON symbols(repo, qualified_name);
-CREATE INDEX idx_calls_repo_callee ON calls(repo, callee_name);
-CREATE INDEX idx_calls_repo_caller ON calls(repo, caller_symbol_id);
-CREATE INDEX idx_imports_repo_module ON imports(repo, module_path);
 ```
 
 ## SCIP Mapping Rules
@@ -445,6 +487,13 @@ GET /symbols/{id}
 GET /calls?repo=repo-bot&caller_name=foo&limit=50
 GET /calls?repo=repo-bot&callee_name=bar&limit=50
 GET /imports?repo=repo-bot&module=fastapi&limit=50
+```
+
+`GET /symbols/{id}` should return the symbol, its file, best-effort callers, and best-effort callees. `GET /status` should return current database/indexing health and latest run summary. `GET /runs` should return recent `index_runs` rows.
+
+Phase 2 SCIP querying:
+
+```text
 GET /scip/documents?repo=repo-bot&limit=50
 GET /scip/occurrences?repo=repo-bot&symbol=...&limit=50
 GET /scip/symbols?repo=repo-bot&prefix=local%20repo-bot&limit=50
@@ -460,7 +509,7 @@ GET /scip/export.json?repo=repo-bot
   -> JSON debug view of the SCIP-shaped export payload
 ```
 
-The JSON endpoint exists for testing and debugging. The protobuf export is the compatibility target.
+The JSON endpoint exists for testing and debugging. The protobuf export is the Phase 2 compatibility target.
 
 Restricted realtime ast-grep search:
 
@@ -476,6 +525,17 @@ POST /search
 ```
 
 `/search` is an auxiliary feature. It should be bounded by `repo`, `path_glob`, and `limit`. It should not become the default chat-time full scan mechanism.
+
+`/search` may be implemented after the Phase 1 SQLite query API is stable, but it should not silently return empty results in a completed implementation. If deferred, it should return an explicit 501 response.
+
+## SQLite Connection Strategy
+
+Phase 1 can use one SQLite connection per FastAPI request because the expected traffic is low and writes happen mostly through offline indexing. The implementation should still:
+
+- Enable WAL mode.
+- Keep write operations transactional.
+- Avoid sharing a single connection across threads unless `check_same_thread=False` and access is guarded.
+- Centralize connection creation in `db.py` so a pooled or per-process read connection can be introduced later if Chat UI starts issuing parallel structural queries.
 
 ## Chat UI Integration
 
@@ -570,7 +630,7 @@ Add:
    - Add SQLite initialization.
 
 2. Implement SQLite schema.
-   - Add DDL for repositories, index_runs, files, SCIP documents, SCIP symbols, SCIP occurrences, SCIP relationships, symbols, calls, and imports.
+   - Add Phase 1 DDL for repositories, index_runs, files, symbols, calls, and imports.
    - Add indexes.
    - Add transaction helpers for replacing one file's extracted records.
 
@@ -585,12 +645,7 @@ Add:
    - TypeScript and JavaScript symbols, calls, imports.
    - Verify rules independently with ast-grep CLI where possible.
 
-5. Implement SCIP mapping.
-   - Generate stable repo-local SCIP symbols.
-   - Convert line/column positions to 0-based SCIP ranges.
-   - Map definitions, references, and imports into SCIP-compatible rows.
-
-6. Implement full offline indexing.
+5. Implement full offline indexing.
    - Walk `/repos`.
    - Identify repository name from the first path segment.
    - Filter supported file extensions and skipped directories.
@@ -598,53 +653,56 @@ Add:
    - Batch insert extracted rows.
    - Record `index_runs`.
 
-7. Implement incremental indexing.
+6. Implement incremental indexing.
    - Compare `size`, `mtime`, and `content_hash`.
    - Reindex changed files.
    - Mark deleted files.
    - Recompute best-effort `callee_symbol_id` links.
 
-8. Implement query APIs.
+7. Implement Phase 1 query APIs.
    - `/symbols`
    - `/symbols/{id}`
    - `/calls`
    - `/imports`
-   - `/scip/documents`
-   - `/scip/occurrences`
-   - `/scip/symbols`
    - `/status`
    - `/runs`
 
-9. Implement SCIP export.
-   - Add JSON debug export first.
-   - Add protobuf `.scip` export once rows map cleanly to SCIP fields.
-   - Add fixture tests that verify exported documents, occurrences, symbols, and relationships.
-
-10. Implement restricted realtime `/search`.
-   - Support `repo`, `language`, `pattern`, `path_glob`, and `limit`.
-   - Enforce limits to avoid accidental full-repository scans during chat.
-
-11. Add Docker and npm integration.
+8. Add Docker and npm integration.
    - Add `ast-service` to compose.
    - Add `ast_data` volume.
    - Add npm scripts.
    - Add `.env.example` entries for AST configuration.
 
-12. Integrate Chat UI.
-    - Add `AST_SERVICE_URL`.
-    - Add sidebar toggle.
-    - Add ast-service client function.
-    - Extract candidate symbols from query and merged results.
-    - Inject structural context into `ask_llm()`.
+9. Integrate Chat UI.
+   - Add `AST_SERVICE_URL`.
+   - Add sidebar toggle.
+   - Add ast-service client function.
+   - Extract candidate symbols from query and merged results.
+   - Inject structural context into `ask_llm()`.
 
-13. Verify end to end.
+10. Verify Phase 1 end to end.
     - Create a small fixture repository for Python and TypeScript.
     - Run full index.
-    - Query symbols, calls, and imports.
-    - Export SCIP JSON/protobuf and verify it contains expected documents and occurrences.
+    - Query symbols, calls, imports, status, and runs.
     - Run incremental index after modifying a file.
     - Confirm Chat UI answers include structural context.
     - Confirm Chat UI degrades cleanly if `ast-service` is down.
+
+11. Implement Phase 2 SCIP mapping.
+   - Add SCIP DDL for documents, symbols, occurrences, and relationships.
+   - Generate stable repo-local SCIP symbols.
+   - Convert line/column positions to 0-based SCIP ranges.
+   - Map definitions, references, and imports into SCIP-compatible rows.
+
+12. Implement Phase 2 SCIP export.
+   - Add JSON debug export first.
+   - Add protobuf `.scip` export once rows map cleanly to SCIP fields.
+   - Add fixture tests that verify exported documents, occurrences, symbols, and relationships.
+
+13. Implement restricted realtime `/search` when needed.
+   - Support `repo`, `language`, `pattern`, `path_glob`, and `limit`.
+   - Enforce limits to avoid accidental full-repository scans during chat.
+   - Return explicit 501 while deferred.
 
 ## Verification Plan
 
@@ -692,14 +750,20 @@ Mitigation: cap structural context size and include only concise, ranked facts.
 
 ## Acceptance Criteria
 
+Phase 1:
+
 - `ast-service` can build and start through Docker Compose.
 - A full offline index over `REPOS_ROOT` writes files, symbols, calls, and imports to SQLite.
-- A full offline index also writes SCIP documents, occurrences, symbols, and relationships where they can be inferred.
 - Incremental indexing only processes changed or deleted files.
-- FastAPI exposes working symbols, calls, imports, status, and health endpoints.
-- FastAPI exposes SCIP debug query endpoints and a SCIP export endpoint.
+- FastAPI exposes working symbols, symbol detail, calls, imports, status, runs, and health endpoints.
 - Chat UI can query structural data when enabled.
 - Chat UI still works when ast-service is disabled or unavailable.
 - No application code directly traverses tree-sitter ASTs.
+- Normalization uses ast-grep captures as the primary extraction source.
 - Rules live as ast-grep YAML files and can be debugged independently.
+
+Phase 2:
+
+- A full offline index also writes SCIP documents, occurrences, symbols, and relationships where they can be inferred.
+- FastAPI exposes SCIP debug query endpoints and a SCIP export endpoint.
 - Exported SCIP data uses stable symbols, 0-based ranges, and declared position encoding.

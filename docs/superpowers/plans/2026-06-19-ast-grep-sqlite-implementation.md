@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build an `ast-service` that runs offline ast-grep scans over repositories, stores SCIP-compatible structure plus convenience symbols/calls/imports in SQLite, exposes FastAPI query/export endpoints, and lets Chat UI enrich answers with structural context.
+**Goal:** Build an `ast-service` that runs offline ast-grep scans over repositories, stores convenience symbols/calls/imports in SQLite for Phase 1, and adds SCIP-compatible export support in Phase 2.
 
-**Architecture:** Add an independent Dockerized FastAPI service beside Sourcebot, Qdrant, and Chat UI. The service uses ast-grep YAML rules for extraction, normalizes matches into SCIP-style documents/occurrences/symbols/relationships plus convenience tables, persists everything in SQLite, and exposes bounded APIs for indexing, querying, SCIP export, and realtime pattern search. Chat UI calls the service optionally after Qdrant/Sourcebot fusion and degrades cleanly if unavailable.
+**Architecture:** Add an independent Dockerized FastAPI service beside Sourcebot, Qdrant, and Chat UI. Phase 1 uses ast-grep YAML rules for extraction, normalizes captures into symbols/calls/imports, persists them in SQLite, and exposes bounded indexing/query APIs. Phase 2 adds SCIP-style documents/occurrences/symbols/relationships and protobuf export without changing Chat UI's convenience API.
 
 **Tech Stack:** Python 3.12, FastAPI, uvicorn, SQLite, pydantic, ast-grep-py, PyYAML, protobuf, requests, Docker Compose, Streamlit.
 
@@ -24,8 +24,29 @@ Important constraints:
 - Do not write a custom rule DSL.
 - Primary path is offline preprocessing into SQLite.
 - Online chat should query SQLite through `ast-service`, not scan all repos.
-- Keep SQLite as the local source of truth, but make its core rows mappable to SCIP `Index`, `Document`, `Occurrence`, `SymbolInformation`, and `Relationship`.
-- Use stable SCIP symbols, 0-based ranges, symbol roles, and declared position encoding.
+- Phase 1 should stay small: `files`, `symbols`, `calls`, `imports`, and `index_runs`.
+- Phase 2 should make SQLite rows mappable to SCIP `Index`, `Document`, `Occurrence`, `SymbolInformation`, and `Relationship`.
+- Phase 2 should use stable SCIP symbols, 0-based ranges, symbol roles, and declared position encoding.
+
+## Execution Phases
+
+Phase 1 tasks:
+
+- Task 1: service skeleton.
+- Task 2: Phase 1 SQLite schema.
+- Task 3: repository scanner.
+- Task 4: ast-grep runner and YAML rules.
+- Task 5: capture-driven normalizer.
+- Task 7: offline indexer.
+- Task 8: Phase 1 query/status APIs.
+- Task 10: Docker/npm integration.
+- Task 11: Chat UI structural context.
+- Task 12: end-to-end verification for Phase 1.
+
+Phase 2 tasks:
+
+- Task 6: SCIP compatibility layer.
+- Task 9: SCIP debug/protobuf export and optional realtime `/search`.
 
 ## Target File Structure
 
@@ -47,10 +68,12 @@ ast-service/
 │   ├── __init__.py
 │   └── scip_pb2.py
 ├── rules/
-│   ├── python-symbols.yml
+│   ├── python-functions.yml
+│   ├── python-classes.yml
 │   ├── python-calls.yml
 │   ├── python-imports.yml
-│   ├── ts-symbols.yml
+│   ├── ts-functions.yml
+│   ├── ts-classes.yml
 │   ├── ts-calls.yml
 │   └── ts-imports.yml
 └── tests/
@@ -84,8 +107,8 @@ Responsibilities:
 - `repository_scanner.py`: repository discovery and source file filtering.
 - `astgrep_runner.py`: ast-grep-py wrapper and YAML rule loading. Keep this isolated so CLI fallback can be added later.
 - `normalizer.py`: convert ast-grep match/capture output into database records.
-- `scip.py`: build SCIP symbols, ranges, roles, symbol information, relationships, and export payloads.
-- `scip_proto/`: generated Python protobuf bindings from the official SCIP `scip.proto`.
+- `scip.py`: Phase 2 module for SCIP symbols, ranges, roles, symbol information, relationships, and export payloads.
+- `scip_proto/`: Phase 2 generated Python protobuf bindings from the official SCIP `scip.proto`.
 - `indexer.py`: full/incremental offline indexing.
 - `main.py`: FastAPI routes.
 - `rules/*.yml`: ast-grep official YAML rules.
@@ -110,7 +133,6 @@ uvicorn[standard]>=0.30
 pydantic>=2.7
 PyYAML>=6.0
 ast-grep-py>=0.35
-protobuf>=5.0
 pytest>=8.0
 httpx>=0.27
 ```
@@ -255,10 +277,6 @@ def test_init_db_creates_expected_tables(tmp_path):
         "repositories",
         "index_runs",
         "files",
-        "scip_documents",
-        "scip_symbols",
-        "scip_occurrences",
-        "scip_relationships",
         "symbols",
         "calls",
         "imports",
@@ -352,58 +370,10 @@ CREATE TABLE IF NOT EXISTS files (
   UNIQUE(repo, path)
 );
 
-CREATE TABLE IF NOT EXISTS scip_documents (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  repo TEXT NOT NULL,
-  relative_path TEXT NOT NULL,
-  language TEXT,
-  position_encoding TEXT NOT NULL DEFAULT 'UTF8',
-  UNIQUE(file_id)
-);
-
-CREATE TABLE IF NOT EXISTS scip_symbols (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  repo TEXT NOT NULL,
-  scip_symbol TEXT NOT NULL,
-  display_name TEXT NOT NULL,
-  kind TEXT,
-  documentation TEXT,
-  signature_documentation TEXT,
-  enclosing_symbol TEXT,
-  UNIQUE(repo, scip_symbol)
-);
-
-CREATE TABLE IF NOT EXISTS scip_occurrences (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  document_id INTEGER NOT NULL REFERENCES scip_documents(id) ON DELETE CASCADE,
-  repo TEXT NOT NULL,
-  scip_symbol TEXT NOT NULL,
-  range_start_line INTEGER NOT NULL,
-  range_start_character INTEGER NOT NULL,
-  range_end_line INTEGER NOT NULL,
-  range_end_character INTEGER NOT NULL,
-  symbol_roles INTEGER NOT NULL DEFAULT 0,
-  syntax_kind TEXT,
-  enclosing_range_json TEXT
-);
-
-CREATE TABLE IF NOT EXISTS scip_relationships (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  repo TEXT NOT NULL,
-  source_symbol TEXT NOT NULL,
-  target_symbol TEXT NOT NULL,
-  is_reference INTEGER NOT NULL DEFAULT 0,
-  is_implementation INTEGER NOT NULL DEFAULT 0,
-  is_type_definition INTEGER NOT NULL DEFAULT 0,
-  is_definition INTEGER NOT NULL DEFAULT 0
-);
-
 CREATE TABLE IF NOT EXISTS symbols (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   repo TEXT NOT NULL,
-  scip_symbol TEXT,
   name TEXT NOT NULL,
   qualified_name TEXT,
   kind TEXT NOT NULL,
@@ -418,10 +388,8 @@ CREATE TABLE IF NOT EXISTS calls (
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   repo TEXT NOT NULL,
   caller_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-  caller_scip_symbol TEXT,
   callee_name TEXT NOT NULL,
   callee_symbol_id INTEGER REFERENCES symbols(id) ON DELETE SET NULL,
-  callee_scip_symbol TEXT,
   call_line INTEGER NOT NULL
 );
 
@@ -436,11 +404,6 @@ CREATE TABLE IF NOT EXISTS imports (
 
 CREATE INDEX IF NOT EXISTS idx_files_repo_path ON files(repo, path);
 CREATE INDEX IF NOT EXISTS idx_files_repo_hash ON files(repo, content_hash);
-CREATE INDEX IF NOT EXISTS idx_scip_documents_repo_path ON scip_documents(repo, relative_path);
-CREATE INDEX IF NOT EXISTS idx_scip_symbols_repo_symbol ON scip_symbols(repo, scip_symbol);
-CREATE INDEX IF NOT EXISTS idx_scip_occurrences_symbol ON scip_occurrences(repo, scip_symbol);
-CREATE INDEX IF NOT EXISTS idx_scip_relationships_source ON scip_relationships(repo, source_symbol);
-CREATE INDEX IF NOT EXISTS idx_scip_relationships_target ON scip_relationships(repo, target_symbol);
 CREATE INDEX IF NOT EXISTS idx_symbols_repo_name ON symbols(repo, name);
 CREATE INDEX IF NOT EXISTS idx_symbols_qualified ON symbols(repo, qualified_name);
 CREATE INDEX IF NOT EXISTS idx_calls_repo_callee ON calls(repo, callee_name);
@@ -701,10 +664,12 @@ git commit -m "feat(ast-service): discover source files"
 
 **Files:**
 - Create: `ast-service/astgrep_runner.py`
-- Create: `ast-service/rules/python-symbols.yml`
+- Create: `ast-service/rules/python-functions.yml`
+- Create: `ast-service/rules/python-classes.yml`
 - Create: `ast-service/rules/python-calls.yml`
 - Create: `ast-service/rules/python-imports.yml`
-- Create: `ast-service/rules/ts-symbols.yml`
+- Create: `ast-service/rules/ts-functions.yml`
+- Create: `ast-service/rules/ts-classes.yml`
 - Create: `ast-service/rules/ts-calls.yml`
 - Create: `ast-service/rules/ts-imports.yml`
 - Create: `ast-service/tests/fixtures/sample-python/app.py`
@@ -757,19 +722,30 @@ export function handler() {
 
 - [ ] **Step 2: Add initial YAML rules**
 
-Create `ast-service/rules/python-symbols.yml`:
+Create `ast-service/rules/python-functions.yml`:
 
 ```yaml
-id: python-symbols
+id: python-functions
 language: Python
+metadata:
+  entity_kind: function
 rule:
-  any:
-    - pattern: |
-        def $NAME($$$PARAMS):
-            $$$BODY
-    - pattern: |
-        class $NAME:
-            $$$BODY
+  pattern: |
+    def $NAME($$$PARAMS):
+        $$$BODY
+```
+
+Create `ast-service/rules/python-classes.yml`:
+
+```yaml
+id: python-classes
+language: Python
+metadata:
+  entity_kind: class
+rule:
+  pattern: |
+    class $NAME:
+        $$$BODY
 ```
 
 Create `ast-service/rules/python-calls.yml`:
@@ -792,11 +768,13 @@ rule:
     - pattern: from $MODULE import $$$NAMES
 ```
 
-Create `ast-service/rules/ts-symbols.yml`:
+Create `ast-service/rules/ts-functions.yml`:
 
 ```yaml
-id: ts-symbols
+id: ts-functions
 language: TypeScript
+metadata:
+  entity_kind: function
 rule:
   any:
     - pattern: |
@@ -807,6 +785,17 @@ rule:
         export function $NAME($$$PARAMS) {
           $$$BODY
         }
+```
+
+Create `ast-service/rules/ts-classes.yml`:
+
+```yaml
+id: ts-classes
+language: TypeScript
+metadata:
+  entity_kind: class
+rule:
+  any:
     - pattern: |
         class $NAME {
           $$$BODY
@@ -847,14 +836,18 @@ from astgrep_runner import run_rule_file
 
 def test_python_symbol_rule_finds_fixture_symbols():
     source = Path("tests/fixtures/sample-python/app.py")
-    rule = Path("rules/python-symbols.yml")
 
-    matches = run_rule_file(source, rule)
+    matches = run_rule_file(source, Path("rules/python-functions.yml"))
     texts = [match.text for match in matches]
 
-    assert any("class UserService" in text for text in texts)
     assert any("def load_user" in text for text in texts)
     assert any("def handler" in text for text in texts)
+    assert any(match.captures.get("NAME") == "load_user" for match in matches)
+    assert all(match.entity_kind == "function" for match in matches)
+
+    class_matches = run_rule_file(source, Path("rules/python-classes.yml"))
+    assert any("class UserService" in match.text for match in class_matches)
+    assert all(match.entity_kind == "class" for match in class_matches)
 
 
 def test_python_call_rule_finds_fixture_calls():
@@ -865,6 +858,15 @@ def test_python_call_rule_finds_fixture_calls():
 
     assert any("load_user(user_id)" in match.text for match in matches)
     assert any('service.get_user("42")' in match.text for match in matches)
+    assert any(match.captures.get("CALLEE") == "load_user" for match in matches)
+
+
+def test_runner_uses_node_range_for_repeated_matches(tmp_path):
+    source = tmp_path / "repeat.py"
+    source.write_text("def a():\n    foo()\n\ndef b():\n    foo()\n", encoding="utf-8")
+    matches = run_rule_file(source, Path("rules/python-calls.yml"))
+    foo_lines = [match.start_line for match in matches if match.text == "foo()"]
+    assert foo_lines == [2, 5]
 ```
 
 - [ ] **Step 4: Run tests to verify failure**
@@ -895,7 +897,11 @@ class AstGrepMatch:
     text: str
     start_line: int
     end_line: int
+    start_character: int
+    end_character: int
     captures: dict[str, str]
+    rule_id: str
+    entity_kind: str | None = None
 
 
 LANGUAGE_MAP = {
@@ -913,31 +919,50 @@ def load_rule(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def _line_range(source: str, matched_text: str) -> tuple[int, int]:
-    start_idx = source.find(matched_text)
-    if start_idx < 0:
-        return 1, 1
-    start_line = source[:start_idx].count("\n") + 1
-    end_line = start_line + matched_text.count("\n")
-    return start_line, end_line
+SINGLE_CAPTURES = ("NAME", "CALLEE", "MODULE")
+MULTI_CAPTURES = ("ARGS", "BODY", "NAMES", "IMPORTS", "PARAMS")
 
 
 def _captures(node: Any) -> dict[str, str]:
-    get_multiple_matches = getattr(node, "get_multiple_matches", None)
-    if get_multiple_matches is None:
-        return {}
-
     captures: dict[str, str] = {}
-    # ast-grep-py capture APIs differ across versions. Keep this wrapper
-    # defensive and isolated so callers never depend on raw ast-grep nodes.
-    for name in ("NAME", "CALLEE", "MODULE", "NAMES", "IMPORTS"):
-        try:
-            values = get_multiple_matches(name)
-        except Exception:
-            values = []
-        if values:
-            captures[name] = ", ".join(v.text() for v in values)
+    get_match = getattr(node, "get_match", None)
+    if get_match is not None:
+        for name in SINGLE_CAPTURES:
+            try:
+                value = get_match(name)
+            except Exception:
+                value = None
+            if value is not None:
+                captures[name] = value.text()
+
+    get_multiple_matches = getattr(node, "get_multiple_matches", None)
+    if get_multiple_matches is not None:
+        for name in MULTI_CAPTURES:
+            try:
+                values = get_multiple_matches(name)
+            except Exception:
+                values = []
+            if values:
+                captures[name] = ", ".join(v.text() for v in values)
     return captures
+
+
+def _range(node: Any) -> tuple[int, int, int, int]:
+    rng = node.range()
+    start = getattr(rng, "start", None) or rng["start"]
+    end = getattr(rng, "end", None) or rng["end"]
+    start_line = getattr(start, "line", None) if not isinstance(start, dict) else start["line"]
+    start_col = getattr(start, "column", None) if not isinstance(start, dict) else start["column"]
+    end_line = getattr(end, "line", None) if not isinstance(end, dict) else end["line"]
+    end_col = getattr(end, "column", None) if not isinstance(end, dict) else end["column"]
+    return int(start_line) + 1, int(start_col), int(end_line) + 1, int(end_col)
+
+
+def _find_all(root_node: Any, rule: dict[str, Any]) -> list[Any]:
+    try:
+        return list(root_node.find_all(config={"rule": rule}))
+    except TypeError:
+        return list(root_node.find_all(**rule))
 
 
 def run_rule_file(source_path: Path, rule_path: Path) -> list[AstGrepMatch]:
@@ -945,19 +970,23 @@ def run_rule_file(source_path: Path, rule_path: Path) -> list[AstGrepMatch]:
     language = LANGUAGE_MAP[rule_doc["language"]]
     source = source_path.read_text(encoding="utf-8", errors="replace")
     root = SgRoot(source, language)
+    metadata = rule_doc.get("metadata") or {}
 
-    rule = rule_doc["rule"]
-    nodes = root.root().find_all(rule)
+    nodes = _find_all(root.root(), rule_doc["rule"])
     matches: list[AstGrepMatch] = []
     for node in nodes:
         text = node.text()
-        start_line, end_line = _line_range(source, text)
+        start_line, start_character, end_line, end_character = _range(node)
         matches.append(
             AstGrepMatch(
                 text=text,
                 start_line=start_line,
                 end_line=end_line,
+                start_character=start_character,
+                end_character=end_character,
                 captures=_captures(node),
+                rule_id=rule_doc["id"],
+                entity_kind=metadata.get("entity_kind"),
             )
         )
     return matches
@@ -997,8 +1026,8 @@ from normalizer import normalize_calls, normalize_imports, normalize_symbols
 
 def test_normalize_python_symbols_extracts_basic_names():
     matches = [
-        AstGrepMatch("def load_user(user_id: str):\n    pass", 10, 11, {}),
-        AstGrepMatch("class UserService:\n    pass", 1, 2, {}),
+        AstGrepMatch("def load_user(user_id: str):\n    pass", 10, 11, 4, 13, {"NAME": "load_user", "PARAMS": "user_id: str"}, "python-functions", "function"),
+        AstGrepMatch("class UserService:\n    pass", 1, 2, 6, 17, {"NAME": "UserService"}, "python-classes", "class"),
     ]
 
     symbols = normalize_symbols("repo", "repo/app.py", "python", matches)
@@ -1011,8 +1040,8 @@ def test_normalize_python_symbols_extracts_basic_names():
 
 def test_normalize_calls_ignores_definitions():
     matches = [
-        AstGrepMatch("load_user(user_id)", 5, 5, {}),
-        AstGrepMatch("def load_user(user_id):\n    pass", 10, 11, {}),
+        AstGrepMatch("load_user(user_id)", 5, 5, 4, 13, {"CALLEE": "load_user"}, "python-calls"),
+        AstGrepMatch("def load_user(user_id):\n    pass", 10, 11, 4, 13, {"NAME": "load_user"}, "python-functions", "function"),
     ]
 
     calls = normalize_calls("repo", "repo/app.py", matches)
@@ -1022,8 +1051,8 @@ def test_normalize_calls_ignores_definitions():
 
 def test_normalize_imports_extracts_modules():
     matches = [
-        AstGrepMatch("import os", 1, 1, {}),
-        AstGrepMatch("from fastapi import APIRouter", 2, 2, {}),
+        AstGrepMatch("import os", 1, 1, 7, 9, {"MODULE": "os"}, "python-imports"),
+        AstGrepMatch("from fastapi import APIRouter", 2, 2, 5, 12, {"MODULE": "fastapi", "NAMES": "APIRouter"}, "python-imports"),
     ]
 
     imports = normalize_imports("repo", "repo/app.py", "python", matches)
@@ -1047,7 +1076,6 @@ Create `ast-service/normalizer.py`:
 
 ```python
 import json
-import re
 from dataclasses import dataclass
 
 from astgrep_runner import AstGrepMatch
@@ -1083,13 +1111,6 @@ class ImportRecord:
     import_line: int
 
 
-DEF_RE = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(([^)]*)\)", re.M)
-PY_CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_][\w]*)", re.M)
-TS_FUNC_RE = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)", re.M)
-TS_CLASS_RE = re.compile(r"^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)", re.M)
-CALL_RE = re.compile(r"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
-
-
 def normalize_symbols(
     repo: str,
     path: str,
@@ -1098,37 +1119,25 @@ def normalize_symbols(
 ) -> list[SymbolRecord]:
     records: list[SymbolRecord] = []
     for match in matches:
-        text = match.text
-        if language == "python":
-            func = DEF_RE.search(text)
-            klass = PY_CLASS_RE.search(text)
-        else:
-            func = TS_FUNC_RE.search(text)
-            klass = TS_CLASS_RE.search(text)
-
-        if func:
-            name = func.group(1)
-            signature = f"({func.group(2)})"
-            records.append(
-                SymbolRecord(repo, path, name, name, "function", match.start_line, match.end_line, signature)
-            )
-        elif klass:
-            name = klass.group(1)
-            records.append(
-                SymbolRecord(repo, path, name, name, "class", match.start_line, match.end_line)
-            )
+        name = match.captures.get("NAME")
+        kind = match.entity_kind
+        if not name or not kind:
+            continue
+        signature = f"({match.captures['PARAMS']})" if "PARAMS" in match.captures else None
+        records.append(
+            SymbolRecord(repo, path, name, name, kind, match.start_line, match.end_line, signature)
+        )
     return records
 
 
 def normalize_calls(repo: str, path: str, matches: list[AstGrepMatch]) -> list[CallRecord]:
     records: list[CallRecord] = []
     for match in matches:
-        stripped = match.text.lstrip()
-        if stripped.startswith(("def ", "class ", "function ", "export function ", "export class ")):
-            continue
-        found = CALL_RE.search(match.text)
-        if found:
-            records.append(CallRecord(repo, path, found.group(1), match.start_line))
+        callee = match.captures.get("CALLEE")
+        if callee:
+            records.append(
+                CallRecord(repo=repo, path=path, callee_name=callee, call_line=match.start_line)
+            )
     return records
 
 
@@ -1140,31 +1149,23 @@ def normalize_imports(
 ) -> list[ImportRecord]:
     records: list[ImportRecord] = []
     for match in matches:
-        text = match.text.strip()
-        module = None
-        imported: list[str] = []
-        if language == "python":
-            if text.startswith("import "):
-                module = text.removeprefix("import ").split()[0]
-            elif text.startswith("from "):
-                before, _, after = text.partition(" import ")
-                module = before.removeprefix("from ").strip()
-                imported = [name.strip() for name in after.split(",") if name.strip()]
-        else:
-            parts = text.split(" from ")
-            if len(parts) == 2:
-                module = parts[1].strip().strip("\"'")
-                imported = [parts[0].removeprefix("import").strip()]
-        if module:
-            records.append(
-                ImportRecord(
-                    repo=repo,
-                    path=path,
-                    module_path=module,
-                    imported_names_json=json.dumps(imported) if imported else None,
-                    import_line=match.start_line,
-                )
+        module = match.captures.get("MODULE")
+        if not module:
+            continue
+        imported = [
+            item.strip()
+            for item in match.captures.get("NAMES", match.captures.get("IMPORTS", "")).split(",")
+            if item.strip()
+        ]
+        records.append(
+            ImportRecord(
+                repo=repo,
+                path=path,
+                module_path=module.strip("\"'"),
+                imported_names_json=json.dumps(imported) if imported else None,
+                import_line=match.start_line,
             )
+        )
     return records
 ```
 
@@ -1185,12 +1186,15 @@ git add ast-service/normalizer.py ast-service/tests/test_normalizer.py
 git commit -m "feat(ast-service): normalize ast-grep matches"
 ```
 
-## Task 6: Add SCIP Compatibility Layer
+## Task 6: Add SCIP Compatibility Layer (Phase 2)
+
+Do this after Phase 1 is working end to end. This task is intentionally listed before the indexer code only because it is a reusable layer; it should not block Phase 1 delivery.
 
 **Files:**
 - Create: `ast-service/scip.py`
 - Create: `ast-service/tests/test_scip.py`
 - Modify: `ast-service/db.py`
+- Modify: `ast-service/tests/test_db.py`
 
 - [ ] **Step 1: Write SCIP mapping tests**
 
@@ -1373,7 +1377,79 @@ def symbol_to_scip_rows(
 
 - [ ] **Step 4: Add DB helpers for SCIP rows**
 
-Extend `ast-service/db.py` with:
+Extend `ast-service/tests/test_db.py` with:
+
+```python
+def test_init_db_creates_scip_phase_two_tables(tmp_path):
+    conn = connect_db(str(tmp_path / "ast.sqlite"))
+    init_db(conn)
+
+    assert {
+        "scip_documents",
+        "scip_symbols",
+        "scip_occurrences",
+        "scip_relationships",
+    }.issubset(table_names(conn))
+```
+
+Extend `ast-service/db.py` schema with:
+
+```sql
+CREATE TABLE IF NOT EXISTS scip_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  language TEXT,
+  position_encoding TEXT NOT NULL DEFAULT 'UTF8',
+  UNIQUE(file_id)
+);
+
+CREATE TABLE IF NOT EXISTS scip_symbols (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  scip_symbol TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  kind TEXT,
+  documentation TEXT,
+  signature_documentation TEXT,
+  enclosing_symbol TEXT,
+  UNIQUE(repo, scip_symbol)
+);
+
+CREATE TABLE IF NOT EXISTS scip_occurrences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL REFERENCES scip_documents(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  scip_symbol TEXT NOT NULL,
+  range_start_line INTEGER NOT NULL,
+  range_start_character INTEGER NOT NULL,
+  range_end_line INTEGER NOT NULL,
+  range_end_character INTEGER NOT NULL,
+  symbol_roles INTEGER NOT NULL DEFAULT 0,
+  syntax_kind TEXT,
+  enclosing_range_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scip_relationships (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  source_symbol TEXT NOT NULL,
+  target_symbol TEXT NOT NULL,
+  is_reference INTEGER NOT NULL DEFAULT 0,
+  is_implementation INTEGER NOT NULL DEFAULT 0,
+  is_type_definition INTEGER NOT NULL DEFAULT 0,
+  is_definition INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scip_documents_repo_path ON scip_documents(repo, relative_path);
+CREATE INDEX IF NOT EXISTS idx_scip_symbols_repo_symbol ON scip_symbols(repo, scip_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_occurrences_symbol ON scip_occurrences(repo, scip_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_relationships_source ON scip_relationships(repo, source_symbol);
+CREATE INDEX IF NOT EXISTS idx_scip_relationships_target ON scip_relationships(repo, target_symbol);
+```
+
+Then extend `ast-service/db.py` with:
 
 ```python
 from scip import ScipOccurrenceRow, ScipSymbolRow
@@ -1527,9 +1603,6 @@ def test_full_index_writes_symbols_calls_and_imports(tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] >= 3
     assert conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0] >= 2
     assert conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0] >= 2
-    assert conn.execute("SELECT COUNT(*) FROM scip_documents").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM scip_symbols").fetchone()[0] >= 3
-    assert conn.execute("SELECT COUNT(*) FROM scip_occurrences").fetchone()[0] >= 3
 ```
 
 - [ ] **Step 2: Run test to verify failure**
@@ -1659,30 +1732,27 @@ from db import (
     finish_index_run,
     init_db,
     replace_file_records,
-    replace_scip_records,
     start_index_run,
     transaction,
     upsert_file,
-    upsert_scip_document,
 )
 from normalizer import normalize_calls, normalize_imports, normalize_symbols
 from repository_scanner import SourceFile, discover_source_files
-from scip import symbol_to_scip_rows
 
 
 RULES_BY_LANGUAGE = {
     "python": {
-        "symbols": Path("rules/python-symbols.yml"),
+        "symbols": [Path("rules/python-functions.yml"), Path("rules/python-classes.yml")],
         "calls": Path("rules/python-calls.yml"),
         "imports": Path("rules/python-imports.yml"),
     },
     "typescript": {
-        "symbols": Path("rules/ts-symbols.yml"),
+        "symbols": [Path("rules/ts-functions.yml"), Path("rules/ts-classes.yml")],
         "calls": Path("rules/ts-calls.yml"),
         "imports": Path("rules/ts-imports.yml"),
     },
     "javascript": {
-        "symbols": Path("rules/ts-symbols.yml"),
+        "symbols": [Path("rules/ts-functions.yml"), Path("rules/ts-classes.yml")],
         "calls": Path("rules/ts-calls.yml"),
         "imports": Path("rules/ts-imports.yml"),
     },
@@ -1740,21 +1810,14 @@ def index_one_file(conn, source: SourceFile) -> tuple[int, int, int]:
         digest,
     )
     rules = RULES_BY_LANGUAGE[source.language]
-    symbol_matches = run_rule_file(source.abs_path, rules["symbols"])
+    symbol_matches = []
+    for symbol_rule in rules["symbols"]:
+        symbol_matches.extend(run_rule_file(source.abs_path, symbol_rule))
     call_matches = run_rule_file(source.abs_path, rules["calls"])
     import_matches = run_rule_file(source.abs_path, rules["imports"])
     symbols = normalize_symbols(source.repo, source.rel_path, source.language, symbol_matches)
     calls = normalize_calls(source.repo, source.rel_path, call_matches)
     imports = normalize_imports(source.repo, source.rel_path, source.language, import_matches)
-    document_id = upsert_scip_document(conn, file_id, source.repo, source.rel_path, source.language)
-    source_text = source.abs_path.read_text(encoding="utf-8", errors="replace")
-    scip_symbols = []
-    scip_occurrences = []
-    for symbol in symbols:
-        scip_symbol, scip_occurrence = symbol_to_scip_rows(symbol, document_id, source_text)
-        scip_symbols.append(scip_symbol)
-        scip_occurrences.append(scip_occurrence)
-    replace_scip_records(conn, document_id, source.repo, scip_symbols, scip_occurrences)
     return replace_file_records(conn, file_id, source.repo, symbols, calls, imports)
 
 
@@ -1864,11 +1927,18 @@ def test_imports_endpoint_returns_list():
     assert resp.json() == {"imports": []}
 
 
-def test_scip_debug_endpoints_return_lists():
+def test_status_endpoint_returns_latest_runs():
     client = TestClient(app)
-    assert client.get("/scip/documents?repo=missing").json() == {"documents": []}
-    assert client.get("/scip/symbols?repo=missing").json() == {"symbols": []}
-    assert client.get("/scip/occurrences?repo=missing").json() == {"occurrences": []}
+    resp = client.get("/status")
+    assert resp.status_code == 200
+    assert "latest_runs" in resp.json()
+
+
+def test_runs_endpoint_returns_list():
+    client = TestClient(app)
+    resp = client.get("/runs?repo=missing&limit=10")
+    assert resp.status_code == 200
+    assert resp.json() == {"runs": []}
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -1906,6 +1976,12 @@ class SymbolsResponse(BaseModel):
     symbols: list[SymbolItem]
 
 
+class SymbolDetailResponse(BaseModel):
+    symbol: SymbolItem | None
+    callers: list[dict[str, Any]]
+    callees: list[dict[str, Any]]
+
+
 class CallItem(BaseModel):
     id: int
     repo: str
@@ -1937,16 +2013,8 @@ class StatusResponse(BaseModel):
     latest_runs: list[dict[str, Any]]
 
 
-class ScipDocumentsResponse(BaseModel):
-    documents: list[dict[str, Any]]
-
-
-class ScipSymbolsResponse(BaseModel):
-    symbols: list[dict[str, Any]]
-
-
-class ScipOccurrencesResponse(BaseModel):
-    occurrences: list[dict[str, Any]]
+class RunsResponse(BaseModel):
+    runs: list[dict[str, Any]]
 ```
 
 - [ ] **Step 4: Add DB query helpers**
@@ -1980,6 +2048,43 @@ def query_symbols(
     sql += " ORDER BY symbols.repo, files.path, symbols.start_line LIMIT ?"
     params.append(limit)
     return conn.execute(sql, params).fetchall()
+
+
+def get_symbol_detail(conn: sqlite3.Connection, symbol_id: int) -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row]]:
+    symbol = conn.execute(
+        """
+        SELECT symbols.*, files.path
+        FROM symbols
+        JOIN files ON files.id = symbols.file_id
+        WHERE symbols.id = ? AND files.deleted_at IS NULL
+        """,
+        (symbol_id,),
+    ).fetchone()
+    if symbol is None:
+        return None, [], []
+    callers = conn.execute(
+        """
+        SELECT calls.*, files.path
+        FROM calls
+        JOIN files ON files.id = calls.file_id
+        WHERE calls.callee_symbol_id = ? AND files.deleted_at IS NULL
+        ORDER BY calls.repo, files.path, calls.call_line
+        LIMIT 50
+        """,
+        (symbol_id,),
+    ).fetchall()
+    callees = conn.execute(
+        """
+        SELECT calls.*, files.path
+        FROM calls
+        JOIN files ON files.id = calls.file_id
+        WHERE calls.caller_symbol_id = ? AND files.deleted_at IS NULL
+        ORDER BY calls.repo, files.path, calls.call_line
+        LIMIT 50
+        """,
+        (symbol_id,),
+    ).fetchall()
+    return symbol, callers, callees
 
 
 def query_calls(
@@ -2035,6 +2140,305 @@ def query_imports(
     return conn.execute(sql, params).fetchall()
 
 
+def query_runs(conn: sqlite3.Connection, repo: str | None, limit: int) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM index_runs WHERE 1 = 1"
+    params: list[object] = []
+    if repo:
+        sql += " AND (repo = ? OR repo IS NULL)"
+        params.append(repo)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def latest_runs(conn: sqlite3.Connection, limit: int = 5) -> list[sqlite3.Row]:
+    return query_runs(conn, None, limit)
+```
+
+- [ ] **Step 5: Add FastAPI routes**
+
+Modify `ast-service/main.py`:
+
+```python
+from fastapi import FastAPI, Query
+
+from db import (
+    connect_db,
+    get_symbol_detail,
+    init_db,
+    latest_runs,
+    query_calls,
+    query_imports,
+    query_runs,
+    query_symbols,
+)
+from indexer import run_index
+from models import (
+    CallsResponse,
+    HealthResponse,
+    IndexRequest,
+    IndexResponse,
+    ImportsResponse,
+    RunsResponse,
+    StatusResponse,
+    SymbolDetailResponse,
+    SymbolsResponse,
+)
+
+
+app = FastAPI(title="repo-bot ast-service")
+
+
+@app.on_event("startup")
+def startup() -> None:
+    conn = connect_db()
+    init_db(conn)
+    conn.close()
+
+
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse()
+
+
+@app.post("/index", response_model=IndexResponse)
+def index(request: IndexRequest) -> IndexResponse:
+    result = run_index(mode=request.mode, repo=request.repo)
+    return IndexResponse(
+        status="ok",
+        run_id=result.run_id,
+        files_seen=result.files_seen,
+        files_indexed=result.files_indexed,
+        symbols_count=result.symbols_count,
+        calls_count=result.calls_count,
+        imports_count=result.imports_count,
+    )
+
+
+@app.get("/symbols", response_model=SymbolsResponse)
+def symbols(
+    repo: str | None = None,
+    name: str | None = None,
+    kind: str | None = None,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> SymbolsResponse:
+    conn = connect_db()
+    try:
+        rows = query_symbols(conn, repo, name, kind, limit)
+        return SymbolsResponse(symbols=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/symbols/{symbol_id}", response_model=SymbolDetailResponse)
+def symbol_detail(symbol_id: int) -> SymbolDetailResponse:
+    conn = connect_db()
+    try:
+        symbol, callers, callees = get_symbol_detail(conn, symbol_id)
+        return SymbolDetailResponse(
+            symbol=dict(symbol) if symbol else None,
+            callers=[dict(row) for row in callers],
+            callees=[dict(row) for row in callees],
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/calls", response_model=CallsResponse)
+def calls(
+    repo: str | None = None,
+    caller_name: str | None = None,
+    callee_name: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> CallsResponse:
+    conn = connect_db()
+    try:
+        rows = query_calls(conn, repo, caller_name, callee_name, limit)
+        return CallsResponse(calls=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/imports", response_model=ImportsResponse)
+def imports(
+    repo: str | None = None,
+    module: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ImportsResponse:
+    conn = connect_db()
+    try:
+        rows = query_imports(conn, repo, module, limit)
+        return ImportsResponse(imports=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/status", response_model=StatusResponse)
+def status() -> StatusResponse:
+    conn = connect_db()
+    try:
+        return StatusResponse(latest_runs=[dict(row) for row in latest_runs(conn)])
+    finally:
+        conn.close()
+
+
+@app.get("/runs", response_model=RunsResponse)
+def runs(
+    repo: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> RunsResponse:
+    conn = connect_db()
+    try:
+        rows = query_runs(conn, repo, limit)
+        return RunsResponse(runs=[dict(row) for row in rows])
+    finally:
+        conn.close()
+```
+
+- [ ] **Step 6: Run API tests**
+
+Run:
+
+```bash
+cd ast-service && pytest tests/test_api.py -v
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ast-service
+git commit -m "feat(ast-service): add structure query APIs"
+```
+
+## Task 9: Add SCIP Export and Deferred Search APIs (Phase 2)
+
+**Files:**
+- Modify: `ast-service/db.py`
+- Create: `ast-service/scip_proto/__init__.py`
+- Create: `ast-service/scip_proto/scip_pb2.py`
+- Modify: `ast-service/scip.py`
+- Modify: `ast-service/main.py`
+- Modify: `ast-service/models.py`
+- Modify: `ast-service/tests/test_api.py`
+
+- [ ] **Step 1: Add route tests for request validation**
+
+Append to `ast-service/tests/test_api.py`:
+
+```python
+def test_search_requires_bounded_limit():
+    client = TestClient(app)
+    resp = client.post(
+        "/search",
+        json={
+            "repo": "repo",
+            "language": "Python",
+            "pattern": "$A($$$ARGS)",
+            "limit": 1000,
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_search_returns_501_when_deferred():
+    client = TestClient(app)
+    resp = client.post(
+        "/search",
+        json={
+            "repo": "repo",
+            "language": "Python",
+            "pattern": "$A($$$ARGS)",
+            "limit": 10,
+        },
+    )
+    assert resp.status_code == 501
+
+
+def test_scip_debug_endpoints_return_lists():
+    client = TestClient(app)
+    assert client.get("/scip/documents?repo=missing").json() == {"documents": []}
+    assert client.get("/scip/symbols?repo=missing").json() == {"symbols": []}
+    assert client.get("/scip/occurrences?repo=missing").json() == {"occurrences": []}
+
+
+def test_scip_export_json_returns_index_shape():
+    client = TestClient(app)
+    resp = client.get("/scip/export.json?repo=missing")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["metadata"]["tool_info"]["name"] == "repo-bot ast-service"
+    assert data["documents"] == []
+```
+
+- [ ] **Step 2: Extend models for search and SCIP export responses**
+
+Extend `ast-service/models.py`:
+
+```python
+from typing import Any
+
+
+class SearchMatch(BaseModel):
+    repo: str
+    path: str
+    start_line: int
+    end_line: int
+    text: str
+
+
+class SearchResponse(BaseModel):
+    matches: list[SearchMatch]
+
+
+class ScipExportJsonResponse(BaseModel):
+    metadata: dict[str, Any]
+    documents: list[dict[str, Any]]
+
+
+class ScipDocumentsResponse(BaseModel):
+    documents: list[dict[str, Any]]
+
+
+class ScipSymbolsResponse(BaseModel):
+    symbols: list[dict[str, Any]]
+
+
+class ScipOccurrencesResponse(BaseModel):
+    occurrences: list[dict[str, Any]]
+```
+
+- [ ] **Step 3: Add SCIP export helpers**
+
+Add generated protobuf bindings:
+
+```text
+ast-service/scip_proto/__init__.py
+ast-service/scip_proto/scip_pb2.py
+```
+
+Add Phase 2 dependency to `ast-service/requirements.txt`:
+
+```text
+protobuf>=5.0
+grpcio-tools>=1.65
+```
+
+Generate `scip_pb2.py` from the official SCIP `scip.proto`. Keep the generated file isolated under `ast-service/scip_proto/` and do not hand-edit generated protobuf code.
+
+Generation command:
+
+```bash
+mkdir -p ast-service/scip_proto
+curl -fsSL https://raw.githubusercontent.com/sourcegraph/scip/main/scip.proto -o /tmp/scip.proto
+python3 -m grpc_tools.protoc -I/tmp --python_out=ast-service/scip_proto /tmp/scip.proto
+touch ast-service/scip_proto/__init__.py
+```
+
+Extend `ast-service/db.py` with SCIP debug query helpers:
+
+```python
 def query_scip_documents(conn: sqlite3.Connection, repo: str | None, limit: int) -> list[sqlite3.Row]:
     sql = "SELECT * FROM scip_documents WHERE 1 = 1"
     params: list[object] = []
@@ -2083,222 +2487,6 @@ def query_scip_occurrences(
     params.append(limit)
     return conn.execute(sql, params).fetchall()
 ```
-
-- [ ] **Step 5: Add FastAPI routes**
-
-Modify `ast-service/main.py`:
-
-```python
-from fastapi import FastAPI, Query
-
-from db import (
-    connect_db,
-    init_db,
-    query_calls,
-    query_imports,
-    query_scip_documents,
-    query_scip_occurrences,
-    query_scip_symbols,
-    query_symbols,
-)
-from models import (
-    CallsResponse,
-    HealthResponse,
-    ImportsResponse,
-    ScipDocumentsResponse,
-    ScipOccurrencesResponse,
-    ScipSymbolsResponse,
-    SymbolsResponse,
-)
-
-
-app = FastAPI(title="repo-bot ast-service")
-
-
-@app.on_event("startup")
-def startup() -> None:
-    conn = connect_db()
-    init_db(conn)
-    conn.close()
-
-
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse()
-
-
-@app.get("/symbols", response_model=SymbolsResponse)
-def symbols(
-    repo: str | None = None,
-    name: str | None = None,
-    kind: str | None = None,
-    limit: int = Query(default=20, ge=1, le=200),
-) -> SymbolsResponse:
-    conn = connect_db()
-    try:
-        rows = query_symbols(conn, repo, name, kind, limit)
-        return SymbolsResponse(symbols=[dict(row) for row in rows])
-    finally:
-        conn.close()
-
-
-@app.get("/calls", response_model=CallsResponse)
-def calls(
-    repo: str | None = None,
-    caller_name: str | None = None,
-    callee_name: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-) -> CallsResponse:
-    conn = connect_db()
-    try:
-        rows = query_calls(conn, repo, caller_name, callee_name, limit)
-        return CallsResponse(calls=[dict(row) for row in rows])
-    finally:
-        conn.close()
-
-
-@app.get("/imports", response_model=ImportsResponse)
-def imports(
-    repo: str | None = None,
-    module: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-) -> ImportsResponse:
-    conn = connect_db()
-    try:
-        rows = query_imports(conn, repo, module, limit)
-        return ImportsResponse(imports=[dict(row) for row in rows])
-    finally:
-        conn.close()
-
-
-@app.get("/scip/documents", response_model=ScipDocumentsResponse)
-def scip_documents(repo: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> ScipDocumentsResponse:
-    conn = connect_db()
-    try:
-        rows = query_scip_documents(conn, repo, limit)
-        return ScipDocumentsResponse(documents=[dict(row) for row in rows])
-    finally:
-        conn.close()
-
-
-@app.get("/scip/symbols", response_model=ScipSymbolsResponse)
-def scip_symbols(
-    repo: str | None = None,
-    prefix: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-) -> ScipSymbolsResponse:
-    conn = connect_db()
-    try:
-        rows = query_scip_symbols(conn, repo, prefix, limit)
-        return ScipSymbolsResponse(symbols=[dict(row) for row in rows])
-    finally:
-        conn.close()
-
-
-@app.get("/scip/occurrences", response_model=ScipOccurrencesResponse)
-def scip_occurrences(
-    repo: str | None = None,
-    symbol: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-) -> ScipOccurrencesResponse:
-    conn = connect_db()
-    try:
-        rows = query_scip_occurrences(conn, repo, symbol, limit)
-        return ScipOccurrencesResponse(occurrences=[dict(row) for row in rows])
-    finally:
-        conn.close()
-```
-
-- [ ] **Step 6: Run API tests**
-
-Run:
-
-```bash
-cd ast-service && pytest tests/test_api.py -v
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add ast-service
-git commit -m "feat(ast-service): add structure query APIs"
-```
-
-## Task 9: Add Index, SCIP Export, and Search APIs
-
-**Files:**
-- Create: `ast-service/scip_proto/__init__.py`
-- Create: `ast-service/scip_proto/scip_pb2.py`
-- Modify: `ast-service/scip.py`
-- Modify: `ast-service/main.py`
-- Modify: `ast-service/models.py`
-- Modify: `ast-service/tests/test_api.py`
-
-- [ ] **Step 1: Add route tests for request validation**
-
-Append to `ast-service/tests/test_api.py`:
-
-```python
-def test_search_requires_bounded_limit():
-    client = TestClient(app)
-    resp = client.post(
-        "/search",
-        json={
-            "repo": "repo",
-            "language": "Python",
-            "pattern": "$A($$$ARGS)",
-            "limit": 1000,
-        },
-    )
-    assert resp.status_code == 422
-
-
-def test_scip_export_json_returns_index_shape():
-    client = TestClient(app)
-    resp = client.get("/scip/export.json?repo=missing")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["metadata"]["tool_info"]["name"] == "repo-bot ast-service"
-    assert data["documents"] == []
-```
-
-- [ ] **Step 2: Extend models for search and SCIP export responses**
-
-Extend `ast-service/models.py`:
-
-```python
-from typing import Any
-
-
-class SearchMatch(BaseModel):
-    repo: str
-    path: str
-    start_line: int
-    end_line: int
-    text: str
-
-
-class SearchResponse(BaseModel):
-    matches: list[SearchMatch]
-
-
-class ScipExportJsonResponse(BaseModel):
-    metadata: dict[str, Any]
-    documents: list[dict[str, Any]]
-```
-
-- [ ] **Step 3: Add SCIP export helpers**
-
-Add generated protobuf bindings:
-
-```text
-ast-service/scip_proto/__init__.py
-ast-service/scip_proto/scip_pb2.py
-```
-
-Generate `scip_pb2.py` from the official SCIP `scip.proto`. Keep the generated file isolated under `ast-service/scip_proto/` and do not hand-edit generated protobuf code.
 
 Extend `ast-service/scip.py`:
 
@@ -2378,29 +2566,61 @@ def build_scip_export_protobuf(conn, repo: str) -> bytes:
 
 Note: this JSON is a debug view shaped after SCIP concepts. The protobuf `.scip` endpoint is the compatibility target and must be implemented before Task 9 is complete.
 
-- [ ] **Step 4: Add `/index`, `/scip/export.json`, `/scip/export`, and `/search` routes**
+- [ ] **Step 4: Add `/scip/*` and `/search` routes**
 
 Modify `ast-service/main.py`:
 
 ```python
+from fastapi import HTTPException, Query
 from fastapi.responses import Response
-from indexer import run_index
-from models import IndexRequest, IndexResponse, ScipExportJsonResponse, SearchRequest, SearchResponse
+from db import query_scip_documents, query_scip_occurrences, query_scip_symbols
+from models import (
+    ScipDocumentsResponse,
+    ScipExportJsonResponse,
+    ScipOccurrencesResponse,
+    ScipSymbolsResponse,
+    SearchRequest,
+    SearchResponse,
+)
 from scip import build_scip_export_json, build_scip_export_protobuf
 
 
-@app.post("/index", response_model=IndexResponse)
-def index(request: IndexRequest) -> IndexResponse:
-    result = run_index(mode=request.mode, repo=request.repo)
-    return IndexResponse(
-        status="ok",
-        run_id=result.run_id,
-        files_seen=result.files_seen,
-        files_indexed=result.files_indexed,
-        symbols_count=result.symbols_count,
-        calls_count=result.calls_count,
-        imports_count=result.imports_count,
-    )
+@app.get("/scip/documents", response_model=ScipDocumentsResponse)
+def scip_documents(repo: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> ScipDocumentsResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_documents(conn, repo, limit)
+        return ScipDocumentsResponse(documents=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/scip/symbols", response_model=ScipSymbolsResponse)
+def scip_symbols(
+    repo: str | None = None,
+    prefix: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ScipSymbolsResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_symbols(conn, repo, prefix, limit)
+        return ScipSymbolsResponse(symbols=[dict(row) for row in rows])
+    finally:
+        conn.close()
+
+
+@app.get("/scip/occurrences", response_model=ScipOccurrencesResponse)
+def scip_occurrences(
+    repo: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ScipOccurrencesResponse:
+    conn = connect_db()
+    try:
+        rows = query_scip_occurrences(conn, repo, symbol, limit)
+        return ScipOccurrencesResponse(occurrences=[dict(row) for row in rows])
+    finally:
+        conn.close()
 
 
 @app.get("/scip/export.json", response_model=ScipExportJsonResponse)
@@ -2428,12 +2648,10 @@ def scip_export(repo: str) -> Response:
 
 @app.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
-    # Implement as a bounded auxiliary path only. It must never scan every repo
-    # without repo/path/limit constraints.
-    return SearchResponse(matches=[])
+    raise HTTPException(status_code=501, detail="Realtime ast-grep search is deferred")
 ```
 
-Note: Task 9 can leave `/search` returning an empty list after validation. `/scip/export` must return a real SCIP protobuf `Index` payload before this task is considered complete. Use the official `scip.proto` as the contract and keep generated protobuf code isolated under `ast-service/scip_proto/` if generation is needed.
+Note: Task 9 can defer realtime `/search`, but it must return explicit 501 instead of an empty result set. `/scip/export` must return a real SCIP protobuf `Index` payload before this task is considered complete. Use the official `scip.proto` as the contract and keep generated protobuf code isolated under `ast-service/scip_proto/` if generation is needed.
 
 - [ ] **Step 5: Run API tests**
 
@@ -2746,7 +2964,7 @@ curl -fsSL "http://localhost:8502/calls?repo=repo-bot&limit=10"
 
 Expected: JSON response with a `calls` array.
 
-- [ ] **Step 8: Verify SCIP debug export**
+- [ ] **Step 8: Verify SCIP debug export (Phase 2 only)**
 
 Run:
 
@@ -2756,7 +2974,7 @@ curl -fsSL "http://localhost:8502/scip/export.json?repo=repo-bot"
 
 Expected: JSON response with `metadata` and `documents`.
 
-- [ ] **Step 9: Verify SCIP protobuf export**
+- [ ] **Step 9: Verify SCIP protobuf export (Phase 2 only)**
 
 Run:
 
@@ -2799,15 +3017,22 @@ If the AST integration causes issues:
 
 ## Done Criteria
 
+Phase 1:
+
 - All ast-service tests pass.
 - Docker build succeeds.
-- `/health`, `/symbols`, `/calls`, and `/imports` return valid JSON.
-- `/scip/documents`, `/scip/symbols`, and `/scip/occurrences` return valid JSON.
-- `/scip/export.json` returns SCIP-shaped debug JSON.
-- `/scip/export` returns a non-empty SCIP protobuf payload.
+- `/health`, `/status`, `/runs`, `/symbols`, `/symbols/{id}`, `/calls`, and `/imports` return valid JSON.
 - `npm run index:ast` performs offline preprocessing into SQLite.
-- Offline indexing writes SCIP documents, occurrences, symbols, and relationships where inferable.
+- Offline indexing writes files, symbols, calls, and imports.
 - Chat UI can include structural facts when AST retrieval is enabled.
 - Chat UI still answers with Qdrant + Sourcebot when `ast-service` is unavailable.
 - No application code directly traverses tree-sitter ASTs.
+- Normalizer uses ast-grep captures instead of regex extraction.
 - ast-grep extraction rules live in YAML files.
+
+Phase 2:
+
+- `/scip/documents`, `/scip/symbols`, and `/scip/occurrences` return valid JSON.
+- `/scip/export.json` returns SCIP-shaped debug JSON.
+- `/scip/export` returns a non-empty SCIP protobuf payload.
+- Offline indexing writes SCIP documents, occurrences, symbols, and relationships where inferable.
