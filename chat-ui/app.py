@@ -6,6 +6,7 @@ import os, json
 from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
+from sourcebot_client import search_sourcebot as search_sourcebot_client
 load_dotenv()
 
 import hashlib
@@ -120,23 +121,9 @@ def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     return results
 
 def search_sourcebot(query: str, top_k: int = 10) -> list[dict]:
-    import requests
-    url = os.environ.get("SOURCEBOT_URL", "http://sourcebot:3000") + "/api/search/stream"
-    try:
-        resp = requests.post(url, json={"query": query, "limit": top_k}, timeout=10)
-        data = resp.json()
-        results = []
-        for r in data.get("results", [])[:top_k]:
-            results.append({
-                "source": "sourcebot",
-                "repo": r.get("repo", ""),
-                "path": r.get("fileName", r.get("path", "")),
-                "line": r.get("line", ""),
-                "content": r.get("match", r.get("content", "")),
-            })
-        return results
-    except Exception:
-        return []
+    result = search_sourcebot_client(query, top_k=top_k)
+    st.session_state.sourcebot_error = result.error
+    return result.items
 
 def read_file_content(repo: str, path: str, start_line: int, end_line: int) -> str:
     fp = os.path.join(os.environ.get("REPOS_ROOT", "/repos"), path)
@@ -285,6 +272,8 @@ if prompt := st.chat_input("输入你的问题..."):
         ast_facts = search_ast_structure(prompt, merged) if use_ast else []
 
         with st.expander(f"📎 检索到 {len(merged)} 条 ({len(src)} Sourcebot + {len(qdr)} Qdrant)", expanded=False):
+            if st.session_state.get("sourcebot_error"):
+                st.warning(st.session_state.sourcebot_error)
             for r in merged:
                 st.caption(f"[{r['source']}] `{r['repo']}/{r['path']}:{r['line']}` (score: {r.get('score','-')})")
                 if r.get("content"):
