@@ -32,7 +32,7 @@ docker compose up -d chat-ui
 三个 Docker 服务（`docker-compose.yml`）：
 
 ```
-~/jayli/ (13 仓库，只读挂载 :ro)
+REPOS_ROOT (只读挂载 :ro)
     │
     ├─ Sourcebot (v4, :3000) — Zoekt trigram 搜索引擎，精确/正则匹配
     │   配置: config/sourcebot.json，逐一列举仓库名
@@ -54,9 +54,9 @@ docker compose up -d chat-ui
 ## 关键注意
 
 - **环境变量**：`.env` 不提交。`.env.example` 是模板。
-- **Sourcebot v4 管理员**：email `admin@jayli.local`，用户由 SQLite 直插创建，非注册页。清 `sourcebot_data` 卷会丢失登录态。
+- **Sourcebot v4 管理员**：email `admin@local.dev`，用户由 SQLite 直插创建，非注册页。清 `sourcebot_data` 卷会丢失登录态。
 - **容器内 SSL**：yui.cool 自签证书 → `chat-ui/app.py` 里 `httpx.Client(verify=False)`。
 - **ThinkingBlock**：DeepSeek 返回推理块无 `.text` 属性 → `ask_llm` 遍历 `resp.content` 找有 `.text` 的 block。
 - **Qdrant API**：新版 qdrant-client 用 `client.query_points(collection, query=vector, limit=n)`，返回 `.points`。
 - **DashScope 限制**：单次请求 ≤ 20 条、总字符 ≤ ~33000 → `index_code.py` 动态分批 + 单条截断 2000 字符。
-- **容器内路径**：代码仓库在容器内挂载为 `/repos`，通过 `REPOS_ROOT` 环境变量控制，源代码只在宿主机的 `~/jayli/`。
+- **容器内路径**：代码仓库在容器内挂载为 `/repos`，通过 `REPOS_ROOT` 环境变量控制，源代码只在宿主机，通过 `REPOS_ROOT` 环境变量指定。

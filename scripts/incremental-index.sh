@@ -1,10 +1,10 @@
 #!/bin/bash
 # 增量向量索引更新
 # 建议用 cron 定时运行，只处理最近修改的文件
-# crontab 示例: 0 */4 * * * $HOME/jayli/repo-bot/scripts/incremental-index.sh
+# crontab 示例: 0 */4 * * * $HOME/repo-bot/scripts/incremental-index.sh
 
 set -e
-REPOS_ROOT="${REPOS_ROOT:-$HOME/jayli}"
+REPOS_ROOT="${REPOS_ROOT:-$HOME/projects}"
 LAST_RUN_FILE="$HOME/.repo-bot/last_run"
 
 mkdir -p "$(dirname "$LAST_RUN_FILE")"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 代码向量化索引脚本
-遍历 ~/jayli/ 下所有仓库，用 tree-sitter AST 切片后用 bge-m3 做 Embedding写入 Qdrant
+遍历 REPOS_ROOT 下所有仓库，用 tree-sitter AST 切片后做 Embedding 写入 Qdrant
 """
 import os
 import sys
@@ -13,7 +13,7 @@ from pathlib import Path
 # chromadb is an optional fallback, imported only when --backend chroma is used
 
 # === 配置 ===
-REPOS_ROOT = os.path.expanduser(os.environ.get("REPOS_ROOT", "~/jayli"))
+REPOS_ROOT = os.path.expanduser(os.environ.get("REPOS_ROOT", "~/projects"))
 EXTENSIONS = {".py", ".ts", ".tsx", ".go", ".rs", ".java", ".js", ".jsx",
               ".vue", ".sql", ".yaml", ".toml", ".tf", ".lua", ".c", ".cpp", ".h"}
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "target", "dist",

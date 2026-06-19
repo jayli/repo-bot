@@ -4,7 +4,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ${REPOS_ROOT:-~/jayli}:/repos:ro
+      - ${REPOS_ROOT:-~/projects}:/repos:ro
       - ./config/sourcebot.json:/data/config.json:ro
       - sourcebot_data:/data
     environment:
@@ -26,7 +26,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ${REPOS_ROOT:-~/jayli}:/repos:ro
+      - ${REPOS_ROOT:-~/projects}:/repos:ro
     environment:
       - QDRANT_URL=http://qdrant:6333
       - SOURCEBOT_URL=http://sourcebot:3000
