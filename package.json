@@ -2,6 +2,7 @@
   "name": "repo-bot",
   "private": true,
   "scripts": {
+    "init": "test -f .env || cp .env.example .env; test -f config/sourcebot.json || cp config/sourcebot.json.example config/sourcebot.json; echo '配置已初始化，请编辑 .env 和 config/sourcebot.json'",
     "up": "docker compose up -d",
     "down": "docker compose down",
     "restart": "docker compose down && docker compose up -d",
