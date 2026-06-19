@@ -17,13 +17,22 @@ def _auth_token() -> str:
     pwd = os.environ.get("CHAT_PASSWORD", "admin123")
     return hashlib.sha256(f"{user}:{pwd}".encode()).hexdigest()[:16]
 
+@st.cache_resource
+def _session_store() -> dict[str, list[dict]]:
+    return {}
+
 # === 鉴权（URL token 持久化） ===
 if "authenticated" not in st.session_state:
     token = st.query_params.get("token")
     st.session_state.authenticated = (token == _auth_token())
+    if st.session_state.authenticated and token:
+        st.session_state._session_token = token
 
 # === 退出登录 ===
 if st.query_params.get("logout") == "1" and st.session_state.authenticated:
+    token = st.session_state.get("_session_token")
+    if token:
+        _session_store().pop(token, None)
     st.session_state.authenticated = False
     st.session_state.messages = []
     st.query_params.clear()
@@ -39,7 +48,9 @@ if not st.session_state.authenticated:
             env_pass = os.environ.get("CHAT_PASSWORD", "admin123")
             if username == env_user and password == env_pass:
                 st.session_state.authenticated = True
-                st.query_params["token"] = _auth_token()
+                token = _auth_token()
+                st.query_params["token"] = token
+                st.session_state._session_token = token
                 st.rerun()
             else:
                 st.error("用户名或密码错误")
@@ -78,6 +89,12 @@ with st.sidebar:
     use_ast = st.checkbox("AST 结构检索", value=True)
     st.caption(f"AST: {os.environ.get('AST_SERVICE_URL', 'http://ast-service:8502')}")
     st.divider()
+    if st.button("🆕 新对话", use_container_width=True):
+        token = st.session_state.get("_session_token")
+        if token:
+            _session_store().pop(token, None)
+        st.session_state.messages = []
+        st.rerun()
     st.caption(f"👤 {os.environ.get('CHAT_USERNAME', 'admin')}")
     st.markdown("<a href='?logout=1' style='font-size:14px;'>退出登录</a>", unsafe_allow_html=True)
 
@@ -193,8 +210,7 @@ def search_ast_structure(query: str, results: list[dict], limit: int = 8) -> lis
                 continue
     return facts
 
-@st.cache_data(ttl=600)
-def ask_llm(question: str, ctx_json: str) -> str:
+def ask_llm(question: str, ctx_json: str, history: list[dict] | None = None) -> str:
     import anthropic, httpx
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
@@ -213,6 +229,11 @@ def ask_llm(question: str, ctx_json: str) -> str:
     if not ctx_text.strip():
         return "未找到相关代码内容。"
 
+    messages: list[dict] = []
+    if history:
+        messages.extend(history[-10:])
+    messages.append({"role": "user", "content": f"上下文代码:\n{ctx_text}\n\n问题: {question}"})
+
     client_kwargs = {"api_key": api_key}
     if base_url:
         client_kwargs["base_url"] = base_url
@@ -221,8 +242,8 @@ def ask_llm(question: str, ctx_json: str) -> str:
     resp = client.messages.create(
         model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
         max_tokens=2000,
-        system="你是代码知识库助手。根据提供的代码片段用中文回答用户问题，引用具体文件路径和行号。",
-        messages=[{"role": "user", "content": f"上下文代码:\n{ctx_text}\n\n问题: {question}"}],
+        system="你是代码知识库助手。根据提供的代码片段用中文回答用户问题，引用具体文件路径和行号。你可以结合对话历史理解上下文和指代。",
+        messages=messages,
     )
     for block in resp.content:
         if hasattr(block, "text") and block.text:
@@ -231,7 +252,13 @@ def ask_llm(question: str, ctx_json: str) -> str:
 
 # === 主界面 ===
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    token = st.session_state.get("_session_token")
+    st.session_state.messages = _session_store().get(token, []) if token else []
+
+def _persist_messages():
+    token = st.session_state.get("_session_token")
+    if token:
+        _session_store()[token] = list(st.session_state.messages)
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -239,6 +266,7 @@ for msg in st.session_state.messages:
 
 if prompt := st.chat_input("输入你的问题..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
+    _persist_messages()
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -281,6 +309,8 @@ if prompt := st.chat_input("输入你的问题..."):
                     "content": "\n".join(ast_facts),
                 })
             ctx_json = json.dumps(ctx_items)
-            answer = ask_llm(prompt, ctx_json)
+            history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
+            answer = ask_llm(prompt, ctx_json, history)
         st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
+        _persist_messages()
