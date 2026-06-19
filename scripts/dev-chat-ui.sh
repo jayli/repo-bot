@@ -16,6 +16,10 @@ docker compose up -d --no-build sourcebot qdrant ast-service
 
 export QDRANT_URL="http://localhost:6333"
 export SOURCEBOT_URL="http://localhost:3000"
+if [ "${SOURCEBOT_ORG_DOMAIN:-}" = "$HOME" ]; then
+  export SOURCEBOT_ORG_DOMAIN="~"
+fi
+export SOURCEBOT_ORG_DOMAIN="${SOURCEBOT_ORG_DOMAIN:-~}"
 export AST_SERVICE_URL="http://localhost:8502"
 export REPOS_ROOT="${REPOS_ROOT:-$HOME/projects}"
 
