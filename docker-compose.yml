@@ -38,6 +38,8 @@ services:
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
       - LLM_PROVIDER=${LLM_PROVIDER:-anthropic}
       - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
+      - CHAT_USERNAME=${CHAT_USERNAME:-admin}
+      - CHAT_PASSWORD=${CHAT_PASSWORD:-admin123}
     depends_on:
       - qdrant
       - sourcebot

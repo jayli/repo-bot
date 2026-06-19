@@ -9,6 +9,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(page_title="repo-bot", page_icon="🤖", layout="wide")
+
+# === 鉴权 ===
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("repo-bot — 登录")
+    with st.form("login_form"):
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        if st.form_submit_button("登录"):
+            env_user = os.environ.get("CHAT_USERNAME", "admin")
+            env_pass = os.environ.get("CHAT_PASSWORD", "admin123")
+            if username == env_user and password == env_pass:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("用户名或密码错误")
+    st.stop()
+
 st.title("repo-bot — 本地代码知识库")
 
 # === Embedding helper ===
@@ -39,6 +59,11 @@ with st.sidebar:
     st.divider()
     use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
     use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
+    st.divider()
+    if st.button("退出登录"):
+        st.session_state.authenticated = False
+        st.session_state.messages = []
+        st.rerun()
 
 # === 搜索后端 ===
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
