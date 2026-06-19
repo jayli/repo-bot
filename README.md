@@ -28,7 +28,7 @@ REPOS_ROOT/* 仓库
 3. **Embedding 配置** — 模型名（默认 `text-embedding-v4`）、维度（默认 1024）、API URL、API Key（留空则复用 LLM Key）
 4. **向量库集合名** — Qdrant collection 名称（默认 `codebase`）
 5. **Chat UI 登录** — 用户名/密码（默认 `admin`/`admin123`）
-6. **Sourcebot API Key** — 可先留空，安装后去 `http://localhost:3000` 后台生成，再填入 `~/.repo-bot/.env`
+6. **Sourcebot API Key** — 可先留空，安装后去 `http://localhost:3000/~/settings/apiKeys` 后台生成，再填入 `~/.repo-bot/.env`
 
 ### 2）执行安装
 
