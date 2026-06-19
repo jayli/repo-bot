@@ -22,8 +22,7 @@ REPOS_ROOT/* 仓库
 无需克隆仓库，一个脚本完成全部部署：
 
 ```bash
-curl -O https://raw.githubusercontent.com/jayli/repo-bot/main/scripts/install.sh
-bash install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/jayli/repo-bot/main/scripts/install.sh)
 ```
 
 脚本会依次完成：
