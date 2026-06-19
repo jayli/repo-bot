@@ -62,29 +62,45 @@ for root, dirs, files in os.walk(REPOS):
             print(f"  {fcount} files, {ccount} chunks...")
             sys.stdout.flush()
 
-print(f"\n[3/3] Embedding {ccount} chunks via {MODEL} (batch=25)...")
-points, done = [], 0
-batch_size = 20  # DashScope 限制 ≤20
+print(f"\n[3/3] Embedding {ccount} chunks via {MODEL} (max 30K chars/batch)...")
 
-for i in range(0, len(text_batch), batch_size):
-    batch_texts = text_batch[i:i + batch_size]
-    batch_meta = chunks_batch[i:i + batch_size]
-    resp = client.embeddings.create(model=MODEL, input=batch_texts, dimensions=DIM, encoding_format="float")
+# 截断过长 chunk，避免单条过大导致 API 拒绝
+MAX_CHUNK = 2000
+for idx, t in enumerate(text_batch):
+    if len(t) > MAX_CHUNK:
+        text_batch[idx] = t[:MAX_CHUNK]
+
+MAX_TOKENS_PER_BATCH = 30000
+points, done, i = [], 0, 0
+while i < len(text_batch):
+    cur_texts, cur_meta = [], []
+    cur_len = 0
+    while i < len(text_batch) and len(cur_texts) < 20 and cur_len + len(text_batch[i]) < MAX_TOKENS_PER_BATCH:
+        cur_texts.append(text_batch[i])
+        cur_meta.append(chunks_batch[i])
+        cur_len += len(text_batch[i])
+        i += 1
+    if not cur_texts:
+        # 单条 chunk 超过 30K，强制截断后单条发送
+        cur_texts = [text_batch[i][:MAX_TOKENS_PER_BATCH]]
+        cur_meta = [chunks_batch[i]]
+        i += 1
+    resp = client.embeddings.create(model=MODEL, input=cur_texts, dimensions=DIM, encoding_format="float")
     for j, emb in enumerate(resp.data):
-        uid, rel, repo, sl, el, lang = batch_meta[j]
+        uid, rel, repo, sl, el, lang = cur_meta[j]
         points.append(PointStruct(id=uid, vector=emb.embedding, payload={
             "repo": repo, "path": rel,
             "start_line": sl, "end_line": el,
             "language": lang,
         }))
-    done += len(batch_texts)
+    done += len(cur_texts)
     if len(points) >= 200:
         qdrant.upsert(collection_name=COLLECTION, points=points)
         points.clear()
     print(f"  {done}/{ccount} chunks embedded...")
     sys.stdout.flush()
     if done % 500 == 0:
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 if points:
     qdrant.upsert(collection_name=COLLECTION, points=points)
