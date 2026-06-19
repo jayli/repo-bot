@@ -60,7 +60,7 @@ def build_qdrant_index():
     from sentence_transformers import SentenceTransformer
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://localhost:6333")
-    collection = "jayli_code"
+    collection = os.environ.get("QDRANT_COLLECTION", "codebase")
 
     print(f"[1/3] 加载 Embedding 模型 (bge-m3)...")
     model = SentenceTransformer("BAAI/bge-m3")
@@ -123,6 +123,7 @@ def build_chroma_index():
     from chromadb.config import Settings
     from chromadb.utils import embedding_functions
 
+    coll_name = os.environ.get("QDRANT_COLLECTION", "codebase")
     db_path = os.path.expanduser("~/.repo-bot/chroma_db")
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name="BAAI/bge-m3",
@@ -130,7 +131,7 @@ def build_chroma_index():
     )
     client = chromadb.PersistentClient(path=db_path)
     collection = client.get_or_create_collection(
-        name="jayli_code",
+        name=coll_name,
         embedding_function=ef,
     )
 
@@ -171,8 +172,9 @@ def search(query: str, top_k: int = 10):
     model = SentenceTransformer("BAAI/bge-m3")
     vector = model.encode(query).tolist()
 
+    coll_name = os.environ.get("QDRANT_COLLECTION", "codebase")
     results = client.search(
-        collection_name="jayli_code",
+        collection_name=coll_name,
         query_vector=vector,
         limit=top_k,
     )

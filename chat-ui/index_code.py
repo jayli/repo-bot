@@ -10,7 +10,7 @@ DIM = 1024
 REPOS = os.environ.get("REPOS_ROOT", "/repos")
 QDRANT = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
-COLLECTION = "jayli_code_v4"
+COLLECTION = os.environ.get("QDRANT_COLLECTION", "codebase")
 
 SKIP = {"node_modules", ".git", "__pycache__", "target", "dist", ".venv", "venv", "build", ".next", "vendor", "vendor_"}
 EXT = {".py", ".ts", ".tsx", ".go", ".rs", ".java", ".js", ".jsx", ".vue", ".sql", ".yaml", ".toml", ".tf", ".lua", ".c", ".cpp", ".h", ".sh"}

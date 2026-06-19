@@ -44,7 +44,8 @@ with st.sidebar:
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     client = get_qdrant_client()
     vector = embed_query(query)
-    hits = client.query_points("jayli_code_v4", query=vector, limit=top_k)
+    collection = os.environ.get("QDRANT_COLLECTION", "codebase")
+    hits = client.query_points(collection, query=vector, limit=top_k)
     results = []
     for h in hits.points:
         p = h.payload

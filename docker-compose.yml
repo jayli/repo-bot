@@ -29,6 +29,7 @@ services:
       - ${REPOS_ROOT:-~/projects}:/repos:ro
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-codebase}
       - SOURCEBOT_URL=http://sourcebot:3000
       - REPOS_ROOT=/repos
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}

@@ -40,7 +40,7 @@ REPOS_ROOT (只读挂载 :ro)
     │   ⚠️ config key 名不能含 .，用了会违反 schema (^[a-zA-Z0-9_-]+$)
     │
     ├─ Qdrant (latest, :6333) — 向量数据库，1024 维 COSINE
-    │   Collection: jayli_code_v4
+    │   Collection: QDRANT_COLLECTION 环境变量控制
     │
     └─ Chat UI (Streamlit :8501) — chat-ui/app.py
         左侧可独立开关两路搜索
