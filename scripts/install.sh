@@ -53,7 +53,7 @@ check_prerequisites() {
 
   # 磁盘空间 (至少 10G)
   local available
-  available=$(df -BG "${HOME}" | awk 'NR==2 {print $4}' | tr -d 'G')
+  available=$(df -m "${HOME}" | awk 'NR==2 {printf "%d", $4/1024}')
   if [ "${available:-0}" -lt 10 ]; then
     warn "磁盘可用空间: ${available}G (建议至少 10G，镜像约需 2G + 向量数据)"
   else
