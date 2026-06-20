@@ -82,17 +82,17 @@ def embed_query(text: str) -> list[float]:
 # === 侧边栏 ===
 with st.sidebar:
     st.header("配置")
-    st.caption(f"Embedding: {os.environ.get('EMBEDDING_MODEL', 'text-embedding-v4')} ({os.environ.get('EMBEDDING_BASE_URL', 'dashscope')})")
+    st.caption(f"Embedding: {os.environ.get('EMBEDDING_MODEL', 'text-embedding-v4')}")
     st.caption(f"Qdrant: {os.environ.get('QDRANT_URL', 'http://localhost:6333')}")
     st.caption(f"Sourcebot: {os.environ.get('SOURCEBOT_URL', 'http://localhost:3000')}")
-    st.caption(f"LLM: {os.environ.get('LLM_MODEL', 'claude-sonnet-4-6')} (yui.cool)")
+    st.caption(f"LLM: {os.environ.get('LLM_MODEL', 'claude-sonnet-4-6')}")
+    st.caption(f"AST: {os.environ.get('AST_SERVICE_URL', 'http://ast-service:8502')}")
+    st.caption(f"Neo4j: {os.environ.get('NEO4J_URI', 'bolt://localhost:7687')} ({os.environ.get('NEO4J_DATABASE', 'neo4j')})")
     st.divider()
     use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
     use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
-    use_ast = st.checkbox("AST 结构检索", value=True)
-    use_graph = st.checkbox("Neo4j 图关系检索", value=True)
-    st.caption(f"AST: {os.environ.get('AST_SERVICE_URL', 'http://ast-service:8502')}")
-    st.caption(f"Neo4j: {os.environ.get('NEO4J_URI', 'bolt://localhost:7687')} ({os.environ.get('NEO4J_DATABASE', 'neo4j')})")
+    use_ast = st.checkbox("AST 结构检索（代码树）", value=True)
+    use_graph = st.checkbox("Neo4j 图关系检索（图谱）", value=True)
     st.divider()
     if st.button("🆕 新对话", use_container_width=True):
         token = st.session_state.get("_session_token")
