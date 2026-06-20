@@ -17,6 +17,7 @@ def test_synthesizer_system_prompt_contains_evidence_rules():
 
     system = synthesizer.build_system_prompt("dependency_relation")
 
-    assert "Qdrant" in system
-    assert "不能单独证明直接依赖" in system
     assert "repo/path:Lx" in system
+    assert "不要编造" in system
+    assert "实事求是" in system
+    assert "依赖链路" in system

@@ -585,7 +585,6 @@ if prompt := st.chat_input("输入你的问题..."):
             st.json({
                 "intent": evidence_pack.get("intent"),
                 "candidate_repos": evidence_pack.get("candidate_repos", [])[:5],
-                "retrieval_coverage": evidence_pack.get("retrieval_coverage"),
                 "evidence_count": len(evidence_pack.get("evidence", [])),
             })
 

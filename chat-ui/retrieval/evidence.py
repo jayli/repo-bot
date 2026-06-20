@@ -16,17 +16,17 @@ def evidence_tier(hit: RetrievalHit) -> str:
 
 
 def _claim_for(hit: RetrievalHit) -> str:
-    if hit.source == "precision_search":
-        return "confirmed by repository-local file read/search"
+    if hit.source in {"precision_search", "local_tool"}:
+        return "代码内容匹配"
     if hit.source == "sourcebot":
-        return "exact code search match"
-    if hit.source == "qdrant":
-        return "semantic code search match"
+        return "代码内容匹配"
     if hit.source == "ast":
-        return "structural symbol/import/call fact"
+        return "结构符号/导入/调用事实"
     if hit.source == "neo4j":
-        return "graph relation fact"
-    return "retrieval match"
+        return "图关系事实"
+    if hit.source == "qdrant":
+        return "语义相似匹配"
+    return "检索匹配"
 
 
 def _confidence(items: list[EvidenceItem]) -> str:
@@ -57,10 +57,6 @@ def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit
                 content=hit.content[:4000],
             )
         )
-    coverage = {}
-    for source in ["sourcebot", "qdrant", "ast", "neo4j", "precision_search"]:
-        used = any(hit.source == source for hit in hits)
-        coverage[source] = {"used": used, "summary": "provided evidence" if used else "未提供有效证据"}
     return {
         "query": query,
         "intent": plan.intent,
@@ -68,7 +64,5 @@ def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit
         "entities": plan.entities,
         "candidate_repos": ranked_repos,
         "evidence": [item.to_dict() for item in evidence],
-        "retrieval_coverage": coverage,
         "confidence": _confidence(evidence),
-        "known_gaps": [],
     }

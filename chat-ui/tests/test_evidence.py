@@ -44,4 +44,5 @@ def test_build_evidence_pack_assigns_high_confidence_for_two_strong_layers():
 
     assert pack["confidence"] == "high"
     assert pack["evidence"][0]["tier"] == "strong"
-    assert pack["retrieval_coverage"]["sourcebot"]["used"] is True
+    assert "retrieval_coverage" not in pack
+    assert "known_gaps" not in pack
