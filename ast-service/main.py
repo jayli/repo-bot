@@ -16,9 +16,23 @@ from db import (
     query_scip_symbols,
     query_symbols,
 )
+from graph import (
+    GraphConfig,
+    create_driver,
+    ensure_constraints,
+    graph_health,
+    query_call_paths,
+    query_impact,
+    sync_graph_from_sqlite,
+    verify_connectivity,
+)
 from indexer import run_index
 from models import (
     CallsResponse,
+    GraphCallPathsResponse,
+    GraphHealthResponse,
+    GraphImpactResponse,
+    GraphSyncResponse,
     HealthResponse,
     IndexRequest,
     IndexResponse,
@@ -42,7 +56,19 @@ async def lifespan(_app: FastAPI):
     conn = connect_db()
     init_db(conn)
     conn.close()
-    yield
+
+    graph_config = GraphConfig.from_env()
+    driver = create_driver(graph_config)
+    if driver is not None:
+        verify_connectivity(driver)
+        ensure_constraints(driver, graph_config.database)
+    _app.state.graph_config = graph_config
+    _app.state.neo4j_driver = driver
+    try:
+        yield
+    finally:
+        if driver is not None:
+            driver.close()
 
 
 app = FastAPI(title="repo-bot ast-service", lifespan=lifespan)
@@ -211,3 +237,56 @@ def scip_export(repo: str) -> Response:
 @app.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
     raise HTTPException(status_code=501, detail="Realtime ast-grep search is deferred")
+
+
+@app.get("/graph/health", response_model=GraphHealthResponse)
+def graph_health_endpoint() -> GraphHealthResponse:
+    gc = app.state.graph_config
+    driver = app.state.neo4j_driver
+    result = graph_health(gc, driver)
+    return GraphHealthResponse(**result)
+
+
+@app.post("/graph/sync", response_model=GraphSyncResponse)
+def graph_sync(repo: str | None = None) -> GraphSyncResponse:
+    driver = app.state.neo4j_driver
+    if driver is None:
+        raise HTTPException(status_code=400, detail="Neo4j is disabled")
+    config = app.state.graph_config
+    conn = connect_db()
+    try:
+        repos_synced = sync_graph_from_sqlite(conn, driver, config.database, repo=repo)
+        return GraphSyncResponse(status="ok", repos_synced=repos_synced)
+    finally:
+        conn.close()
+
+
+@app.get("/graph/impact", response_model=GraphImpactResponse)
+def graph_impact(
+    repo: str,
+    symbol: str,
+    depth: int = Query(default=2, ge=1, le=4),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> GraphImpactResponse:
+    driver = app.state.neo4j_driver
+    if driver is None:
+        raise HTTPException(status_code=400, detail="Neo4j is disabled")
+    config = app.state.graph_config
+    facts = query_impact(driver, config.database, repo, symbol, depth, limit)
+    return GraphImpactResponse(facts=facts)
+
+
+@app.get("/graph/call-paths", response_model=GraphCallPathsResponse)
+def graph_call_paths(
+    repo: str,
+    from_symbol: str,
+    to_symbol: str,
+    max_depth: int = Query(default=4, ge=1, le=6),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> GraphCallPathsResponse:
+    driver = app.state.neo4j_driver
+    if driver is None:
+        raise HTTPException(status_code=400, detail="Neo4j is disabled")
+    config = app.state.graph_config
+    paths = query_call_paths(driver, config.database, repo, from_symbol, to_symbol, max_depth, limit)
+    return GraphCallPathsResponse(paths=paths)

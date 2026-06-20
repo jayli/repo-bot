@@ -18,6 +18,13 @@ from db import (
     transaction,
     upsert_file,
 )
+from graph import (
+    GraphConfig,
+    create_driver,
+    ensure_constraints,
+    refresh_repo_graph,
+    verify_connectivity,
+)
 from normalizer import normalize_calls, normalize_imports, normalize_symbols
 from repository_scanner import SourceFile, discover_source_files
 
@@ -121,10 +128,18 @@ def run_index(mode: str = "incremental", repo: str | None = None) -> IndexResult
     symbols_count = 0
     calls_count = 0
     imports_count = 0
+
+    graph_config = GraphConfig.from_env()
+    driver = create_driver(graph_config)
     try:
+        if graph_config.enabled:
+            verify_connectivity(driver)
+            ensure_constraints(driver, graph_config.database)
+
         files = discover_source_files(repos_root())
         seen_repos: set[str] = set()
         seen_file_ids: dict[str, set[int]] = {}
+        repos_needing_graph_refresh: set[str] = set()
         for source in files:
             if repo and source.repo != repo:
                 continue
@@ -147,6 +162,7 @@ def run_index(mode: str = "incremental", repo: str | None = None) -> IndexResult
             imports_count += i_count
             seen_repos.add(source.repo)
             seen_file_ids.setdefault(source.repo, set()).add(file_id)
+            repos_needing_graph_refresh.add(source.repo)
 
         if mode == "incremental":
             sql = "SELECT DISTINCT repo FROM files WHERE deleted_at IS NULL"
@@ -160,7 +176,13 @@ def run_index(mode: str = "incremental", repo: str | None = None) -> IndexResult
         for indexed_repo in sorted(seen_repos):
             link_callee_symbols(conn, indexed_repo)
             if mode == "incremental":
-                mark_deleted_files(conn, indexed_repo, seen_file_ids.get(indexed_repo, set()))
+                deleted = mark_deleted_files(conn, indexed_repo, seen_file_ids.get(indexed_repo, set()))
+                if deleted > 0:
+                    repos_needing_graph_refresh.add(indexed_repo)
+
+        if graph_config.enabled:
+            for indexed_repo in sorted(repos_needing_graph_refresh):
+                refresh_repo_graph(conn, driver, graph_config.database, indexed_repo)
 
         finish_index_run(
             conn,
@@ -176,6 +198,8 @@ def run_index(mode: str = "incremental", repo: str | None = None) -> IndexResult
         finish_index_run(conn, run_id, "error", files_seen, files_indexed, symbols_count, calls_count, imports_count, str(exc))
         raise
     finally:
+        if driver is not None:
+            driver.close()
         conn.close()
     return IndexResult(run_id, files_seen, files_indexed, symbols_count, calls_count, imports_count)
 

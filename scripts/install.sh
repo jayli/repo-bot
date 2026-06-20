@@ -162,6 +162,18 @@ collect_config() {
   QDRANT_COLLECTION="${QDRANT_COLLECTION:-codebase}"
   echo ""
 
+  # -- Neo4j 图关系索引 --
+  echo ">>>> Neo4j 图关系索引"
+  read -r -p "  启用 Neo4j 图关系索引? [Y/n]: " neo4j_enabled
+  case "${neo4j_enabled:-y}" in
+    [nN]*) NEO4J_ENABLED="false" ;;
+    *) NEO4J_ENABLED="true" ;;
+  esac
+  echo "  -> NEO4J_ENABLED=${NEO4J_ENABLED}"
+  read -r -p "  Neo4j 密码 [repo-bot-neo4j]: " NEO4J_PASSWORD
+  NEO4J_PASSWORD="${NEO4J_PASSWORD:-repo-bot-neo4j}"
+  echo ""
+
   # 写入 .env
   info "写入配置到 ${INSTALL_DIR}/.env ..."
   cat > "${INSTALL_DIR}/.env" <<ENVEOF
@@ -194,6 +206,12 @@ SOURCEBOT_ORG_DOMAIN=~
 CHAT_USERNAME=${CHAT_USERNAME}
 CHAT_PASSWORD=${CHAT_PASSWORD}
 
+# === Neo4j 图关系索引 ===
+NEO4J_ENABLED=${NEO4J_ENABLED}
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=${NEO4J_PASSWORD}
+
 # === 代码仓库根目录 ===
 REPOS_ROOT=${REPOS_ROOT}
 ENVEOF
@@ -223,6 +241,9 @@ pull_images() {
   info "拉取 ${REGISTRY}/repo-bot-ast-service:latest-${ARCH} ..."
   docker pull "${REGISTRY}/repo-bot-ast-service:latest-${ARCH}"
   docker tag "${REGISTRY}/repo-bot-ast-service:latest-${ARCH}" "repo-bot-ast-service:latest"
+
+  info "拉取 neo4j:5-community ..."
+  docker pull "neo4j:5-community"
 
   info "所有镜像拉取完成"
 }
@@ -310,6 +331,28 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
+  neo4j:
+    image: ${NEO4J_IMAGE:-neo4j:5-community}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-repo-bot-neo4j}
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-512m}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-2G}
+      - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-1G}
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_PASSWORD:-repo-bot-neo4j}\" 'RETURN 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
   chat-ui:
     image: repo-bot-chat-ui:latest
     ports:
@@ -340,12 +383,23 @@ services:
     environment:
       - REPOS_ROOT=/repos
       - AST_DB_PATH=/data/ast.sqlite
+      - NEO4J_ENABLED=${NEO4J_ENABLED:-true}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-repo-bot-neo4j}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+    depends_on:
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   sourcebot_data:
   qdrant_data:
   ast_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
 COMPOSEEOF
 
   info "已生成 docker-compose.yml"
@@ -389,6 +443,10 @@ start_services() {
       all_ok=false
     fi
 
+    if ! curl -s http://localhost:7474 &>/dev/null; then
+      all_ok=false
+    fi
+
     if [ "${all_ok}" = true ]; then
       break
     fi
@@ -402,7 +460,7 @@ start_services() {
   docker compose ps
 
   local all_running=true
-  for svc in qdrant sourcebot chat-ui ast-service; do
+  for svc in qdrant sourcebot chat-ui ast-service neo4j; do
     if docker compose ps "${svc}" 2>/dev/null | grep -q 'Up'; then
       info "  ${svc}: 运行中"
     else
@@ -477,6 +535,7 @@ main() {
   echo "  Sourcebot: http://localhost:3000"
   echo "  Qdrant Dashboard: http://localhost:6333/dashboard"
   echo "  AST API Docs: http://localhost:8502/docs"
+  echo "  Neo4j Browser: http://localhost:7474"
   echo "================================================"
 
   check_prerequisites
@@ -495,6 +554,7 @@ main() {
   echo "    Sourcebot:   http://localhost:3000  (注册管理员 + 设置 API Key)"
   echo "    Qdrant:      http://localhost:6333/dashboard"
   echo "    AST API:     http://localhost:8502/docs"
+  echo "    Neo4j:       http://localhost:7474  (neo4j / 你的密码)"
   echo ""
   echo "  后续操作:"
   echo "    1. 在 Sourcebot 设置页创建 API Key 并更新到 ${INSTALL_DIR}/.env"

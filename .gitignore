@@ -7,3 +7,4 @@ __pycache__/
 chat-ui/.streamlit/
 .venv/
 config/sourcebot.json
+.data/

@@ -18,6 +18,10 @@ npm run open                   # 打开 Chat UI http://localhost:8501
 npm run open:sourcebot         # 打开 Sourcebot http://localhost:3000
 npm run open:qdrant            # 打开 Qdrant Dashboard http://localhost:6333/dashboard
 npm run open:ast               # 打开 ast-service API 文档 http://localhost:8502/docs
+npm run open:neo4j             # 打开 Neo4j Browser http://localhost:7474
+
+npm run dev:ast                # 本地开发 ast-service（停止容器内 ast-service，宿主机跑 uvicorn）
+npm run graph:sync             # 同步 Neo4j 图关系（从 SQLite 重建）
 
 npm run index                  # 全量重建向量索引（复制 index_code.py 到容器内执行）
 npm run index:incr             # 增量向量索引
@@ -61,7 +65,7 @@ docker compose up -d chat-ui
 
 ## 架构
 
-四个 Docker 服务（`docker-compose.yml`）：
+五个 Docker 服务（`docker-compose.yml`）：
 
 ```
 REPOS_ROOT (只读挂载 :ro)
@@ -74,9 +78,14 @@ REPOS_ROOT (只读挂载 :ro)
     ├─ Qdrant (latest, :6333) — 向量数据库，1024 维 COSINE
     │   Collection: QDRANT_COLLECTION 环境变量控制
     │
-    ├─ ast-service (FastAPI :8502) — ast-grep 结构索引，SQLite 持久化
-    │   全量/增量索引 → SQLite → REST API → Chat UI 结构上下文
-    │   28 个 pytest 测试（API / DB / 索引 / SCIP / normalizer / 扫描器）
+    ├─ Neo4j (5-community, :7474/:7687) — 图关系存储，ast-service 派生写入
+    │   节点: Repository / File / Symbol / ExternalSymbol / Module
+    │   关系: CONTAINS / DEFINES / CALLS / IMPORTS
+    │   约束: 唯一性约束 (repo+name, repo+path, repo+symbol_id 等)
+    │
+    ├─ ast-service (FastAPI :8502) — ast-grep 结构索引，SQLite + Neo4j 持久化
+    │   全量/增量索引 → SQLite（权威） + Neo4j（派生图）→ REST API → Chat UI 结构上下文
+    │   pytest 测试（API / DB / 索引 / SCIP / normalizer / 扫描器 / graph）
     │
     └─ Chat UI (Streamlit :8501) — chat-ui/app.py
         侧边栏可独立开关三路搜索（Qdrant / Sourcebot / AST 结构检索）
@@ -104,4 +113,5 @@ REPOS_ROOT (只读挂载 :ro)
 - **SCIP protobuf**：`ast-service/scip_proto/scip_pb2.py` 由真实 `scip.proto` 通过 `grpc_tools.protoc` 生成，非手写 stub。导出端点 `/scip/export?repo=xxx` 返回有效 SCIP payload，可被 `scip_pb2.Index.ParseFromString()` 反序列化。
 - **调用图链接**：`link_calls_in_file()` 按符号行范围窄先匹配（防外层类覆盖内层方法），`link_callee_symbols()` 跨文件按名称匹配。
 - **Docker 镜像发布**：chat-ui / ast-service 推送到阿里云 ACR 个人版 `crpi-x1zji86f6jpcd7t1.cn-hangzhou.personal.cr.aliyuncs.com/lijing00333/`。单平台镜像用 `latest-amd64` / `latest-arm64` 标签，双平台用 `latest` manifest。Qdrant 和 Sourcebot 为公共镜像，不纳入构建发布流程。
-- **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot 来自 Docker Hub/GHCR）。
+- **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot/neo4j 来自 Docker Hub/GHCR）。
+- **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。

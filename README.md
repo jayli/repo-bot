@@ -12,8 +12,9 @@ REPOS_ROOT/* 仓库
     │
     ├──→ Sourcebot（Zoekt trigram 引擎） → 精确/正则匹配、代码导航
     ├──→ Qdrant（向量库）                → 语义检索、中文理解
-    └──→ ast-service（ast-grep 结构索引）→ 调用关系、符号定义跳转
-            │
+    ├──→ ast-service（ast-grep 结构索引）→ 调用关系、符号定义跳转
+    │       │
+    │       └──→ Neo4j（图关系存储）      → 多跳调用链、影响分析
     ┌── RRF 混合检索融合 ──→ Chat UI（Streamlit）← LLM 生成回答
               │
     Embedding: OpenAI 兼容接口（默认 DashScope text-embedding-v4）
@@ -44,7 +45,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jayli/repo-bot/main/scripts/
 脚本会依次完成：
 1. **环境检查** — 确认 Docker、磁盘空间、内存
 2. **交互配置** — 引导填写 LLM Key、仓库路径、Embedding 参数等，自动生成 `.env`
-3. **拉取镜像** — 从阿里云 ACR 拉取 chat-ui/ast-service，从 Docker Hub/GHCR 拉取 Qdrant/Sourcebot
+3. **拉取镜像** — 从阿里云 ACR 拉取 chat-ui/ast-service，从 Docker Hub/GHCR 拉取 Qdrant/Sourcebot/Neo4j
 4. **启动服务** — `docker compose up -d`，等待全部就绪
 5. **数据索引** — 可选立即执行向量索引和 AST 结构索引
 
@@ -56,6 +57,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jayli/repo-bot/main/scripts/
 | Sourcebot | http://localhost:3000 | 代码搜索引擎 |
 | Qdrant Dashboard | http://localhost:6333/dashboard | 向量库面板 |
 | AST API Docs | http://localhost:8502/docs | 结构检索 API |
+| Neo4j Browser | http://localhost:7474 | 图数据库浏览器（neo4j / repo-bot-neo4j） |
 
 > **提示**：安装后需前往 Sourcebot 注册管理员账号，在设置页创建 API Key 并填入 `~/.repo-bot/.env` 中的 `SOURCEBOT_API_KEY`，同时触发 reindex 构建代码搜索索引。
 
@@ -90,8 +92,13 @@ npm run build_push:chat-ui:arm/:x86 # 指定平台
 npm run build_push:chat-ui:all      # 双平台构建推送 + manifest
 npm run docker_push:chat-ui         # 推送已有本地镜像到 ACR
 
+# 图关系索引
+npm run graph:sync                  # 同步 Neo4j 图关系（从 SQLite 重建）
+npm run open:neo4j                  # 打开 Neo4j Browser
+
 # 开发
-npm run dev                         # 本地开发 chat-ui（宿主机跑 Streamlit）
+npm run dev                         # 本地开发全栈（ast-service + chat-ui 跑宿主机）
+npm run dev:ast                     # 本地开发 ast-service（宿主机跑 uvicorn）
 npm run init                        # 初始化 .env 和 config/sourcebot.json
 npm run clean                       # 清理悬空镜像
 ```
@@ -137,7 +144,9 @@ repo-bot/
 ├── ast-service/
 │   ├── main.py                     # FastAPI 入口
 │   ├── indexer.py                  # ast-grep 索引
-│   ├── tests/                      # 28 个 pytest
+│   ├── graph.py                    # Neo4j 图关系读写
+│   ├── graph_cli.py                # 图同步 CLI
+│   ├── tests/                      # pytest
 │   └── Dockerfile
 └── CLAUDE.md                       # 开发指南
 ```

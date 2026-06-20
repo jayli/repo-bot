@@ -113,3 +113,122 @@ def test_incremental_index_marks_deleted_files(tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM files WHERE deleted_at IS NOT NULL"
     ).fetchone()[0]
     assert deleted >= 1, f"files with deleted_at: {deleted}"
+
+
+def test_run_index_succeeds_with_graph_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEO4J_ENABLED", "false")
+    repo_root = tmp_path / "repos"
+    copy_fixture(
+        Path("tests/fixtures/sample-python/app.py"),
+        repo_root / "sample-python" / "app.py",
+    )
+    db_path = tmp_path / "ast.sqlite"
+    monkeypatch.setenv("AST_DB_PATH", str(db_path))
+    monkeypatch.setenv("REPOS_ROOT", str(repo_root))
+
+    conn = connect_db(str(db_path))
+    init_db(conn)
+    conn.close()
+
+    result = run_index(mode="full", repo=None)
+    assert result.files_indexed == 1
+
+    conn = connect_db(str(db_path))
+    status_row = conn.execute(
+        "SELECT status FROM index_runs WHERE id = ?", (result.run_id,)
+    ).fetchone()
+    assert status_row is not None
+    assert status_row["status"] == "ok"
+
+
+def test_run_index_calls_graph_refresh_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    repo_root = tmp_path / "repos"
+    copy_fixture(
+        Path("tests/fixtures/sample-python/app.py"),
+        repo_root / "sample-python" / "app.py",
+    )
+    db_path = tmp_path / "ast.sqlite"
+    monkeypatch.setenv("AST_DB_PATH", str(db_path))
+    monkeypatch.setenv("REPOS_ROOT", str(repo_root))
+
+    conn = connect_db(str(db_path))
+    init_db(conn)
+    conn.close()
+
+    call_args = []
+
+    class FakeNeo4jDriver:
+        def close(self):
+            pass
+
+    def fake_create_driver(config):
+        return FakeNeo4jDriver()
+
+    def fake_verify(driver, retries=5, delay_seconds=1.0):
+        pass
+
+    def fake_ensure(driver, database):
+        pass
+
+    def fake_refresh(conn_arg, driver, database, repo_name):
+        call_args.append(repo_name)
+
+    monkeypatch.setattr("indexer.create_driver", fake_create_driver)
+    monkeypatch.setattr("indexer.verify_connectivity", fake_verify)
+    monkeypatch.setattr("indexer.ensure_constraints", fake_ensure)
+    monkeypatch.setattr("indexer.refresh_repo_graph", fake_refresh)
+
+    run_index(mode="full", repo=None)
+    assert len(call_args) >= 1
+    assert "sample-python" in call_args
+
+
+def test_run_index_errors_when_graph_refresh_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    repo_root = tmp_path / "repos"
+    copy_fixture(
+        Path("tests/fixtures/sample-python/app.py"),
+        repo_root / "sample-python" / "app.py",
+    )
+    db_path = tmp_path / "ast.sqlite"
+    monkeypatch.setenv("AST_DB_PATH", str(db_path))
+    monkeypatch.setenv("REPOS_ROOT", str(repo_root))
+
+    conn = connect_db(str(db_path))
+    init_db(conn)
+    conn.close()
+
+    class FakeNeo4jDriver:
+        def close(self):
+            pass
+
+    def fake_create_driver(config):
+        return FakeNeo4jDriver()
+
+    def fake_verify(driver, retries=5, delay_seconds=1.0):
+        pass
+
+    def fake_ensure(driver, database):
+        pass
+
+    def fake_refresh(conn_arg, driver, database, repo_name):
+        raise RuntimeError("Neo4j unavailable")
+
+    monkeypatch.setattr("indexer.create_driver", fake_create_driver)
+    monkeypatch.setattr("indexer.verify_connectivity", fake_verify)
+    monkeypatch.setattr("indexer.ensure_constraints", fake_ensure)
+    monkeypatch.setattr("indexer.refresh_repo_graph", fake_refresh)
+
+    try:
+        run_index(mode="full", repo=None)
+    except RuntimeError:
+        pass
+
+    conn2 = connect_db(str(db_path))
+    row = conn2.execute(
+        "SELECT status, error FROM index_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "error"
+    assert "Neo4j unavailable" in (row["error"] or "")

@@ -115,3 +115,21 @@ class ScipSymbolsResponse(BaseModel):
 
 class ScipOccurrencesResponse(BaseModel):
     occurrences: list[dict[str, Any]]
+
+
+class GraphHealthResponse(BaseModel):
+    enabled: bool
+    status: str
+
+
+class GraphSyncResponse(BaseModel):
+    status: str
+    repos_synced: list[str]
+
+
+class GraphImpactResponse(BaseModel):
+    facts: list[dict[str, Any]]
+
+
+class GraphCallPathsResponse(BaseModel):
+    paths: list[list[dict[str, Any]]]

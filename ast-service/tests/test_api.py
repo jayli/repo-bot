@@ -84,3 +84,27 @@ def test_scip_export_json_returns_index_shape(client):
     data = resp.json()
     assert data["metadata"]["tool_info"]["name"] == "repo-bot ast-service"
     assert data["documents"] == []
+
+
+def test_graph_health_returns_disabled_by_default(client):
+    resp = client.get("/graph/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["enabled"] is False
+    assert data["status"] == "disabled"
+
+
+def test_graph_sync_returns_400_when_disabled(client):
+    resp = client.post("/graph/sync")
+    assert resp.status_code == 400
+    assert "disabled" in resp.json()["detail"].lower()
+
+
+def test_graph_impact_returns_400_when_disabled(client):
+    resp = client.get("/graph/impact?repo=r&symbol=s")
+    assert resp.status_code == 400
+
+
+def test_graph_call_paths_returns_400_when_disabled(client):
+    resp = client.get("/graph/call-paths?repo=r&from_symbol=a&to_symbol=b")
+    assert resp.status_code == 400

@@ -53,6 +53,28 @@ services:
       - ast-service
     restart: unless-stopped
 
+  neo4j:
+    image: ${NEO4J_IMAGE:-neo4j:5-community}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-repo-bot-neo4j}
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL:-512m}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX:-2G}
+      - NEO4J_server_memory_pagecache_size=${NEO4J_PAGECACHE:-1G}
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_PASSWORD:-repo-bot-neo4j}\" 'RETURN 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
   ast-service:
     build: ./ast-service
     ports:
@@ -63,9 +85,20 @@ services:
     environment:
       - REPOS_ROOT=/repos
       - AST_DB_PATH=/data/ast.sqlite
+      - NEO4J_ENABLED=${NEO4J_ENABLED:-true}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-repo-bot-neo4j}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+    depends_on:
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   sourcebot_data:
   qdrant_data:
   ast_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
