@@ -1,6 +1,9 @@
 # repo-bot
 
-本地代码知识库 — 为 `REPOS_ROOT`（替换为你仓库集合根目录） 下所有仓库提供代码搜索 + 语义检索 + 结构检索 + AI 对话。
+<img width="200" alt="logo_word" src="https://github.com/user-attachments/assets/070b2725-df05-4894-a36c-a3813d0be75c" />
+
+
+本地代码知识库 — 为本地特定目录下的代码仓库提供检索 + 语义检索 + 结构检索 + AI 对话。
 
 ## 架构
 
