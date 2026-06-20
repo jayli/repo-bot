@@ -25,3 +25,23 @@ def test_retrieval_hit_to_dict_keeps_location():
 
     assert hit.to_dict()["repo"] == "block-proxy"
     assert hit.to_dict()["line_range"] == "L3-L12"
+
+
+def test_build_evidence_pack_assigns_high_confidence_for_two_strong_layers():
+    models = load_module("retrieval.models")
+    evidence = load_module("retrieval.evidence")
+    plan = models.RetrievalPlan(
+        "dependency_relation",
+        "dependency_relation",
+        entities={"subject": "block-proxy", "object": "anyproxy"},
+    )
+    hits = [
+        models.RetrievalHit("precision_search", "block-proxy", "package.json", "L1-L10", "anyproxy", "file_confirmed"),
+        models.RetrievalHit("sourcebot", "block-proxy", "src/server.js", "L3", "require('anyproxy')", "exact_text"),
+    ]
+
+    pack = evidence.build_evidence_pack("block-proxy 是怎样依赖 anyproxy 的", plan, hits, [{"repo": "block-proxy", "score": 20}])
+
+    assert pack["confidence"] == "high"
+    assert pack["evidence"][0]["tier"] == "strong"
+    assert pack["retrieval_coverage"]["sourcebot"]["used"] is True
