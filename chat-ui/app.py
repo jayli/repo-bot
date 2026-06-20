@@ -7,13 +7,15 @@ from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
-from retrieval.planner import plan_query
+from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
 from retrieval.ranking import rank_repositories, should_run_precision_search
 from retrieval.precision import grep_repo, read_file_window, read_manifest
 from retrieval.evidence import build_evidence_pack
 from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
 load_dotenv()
+
+USE_LLM_PLANNER = os.environ.get("LLM_PLANNER_ENABLED", "false").lower() == "true"
 
 import hashlib
 
@@ -437,6 +439,33 @@ if prompt := st.chat_input("输入你的问题..."):
 
     with st.chat_message("assistant"):
         plan = plan_query(prompt)
+
+        if USE_LLM_PLANNER and plan.intent in {"dependency_relation", "call_chain", "troubleshooting"}:
+            try:
+                import anthropic, httpx
+                api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+                base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+                if api_key:
+                    client_kwargs = {"api_key": api_key}
+                    if base_url:
+                        client_kwargs["base_url"] = base_url
+                    client_kwargs["http_client"] = httpx.Client(verify=False)
+                    client = anthropic.Anthropic(**client_kwargs)
+                    resp = client.messages.create(
+                        model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+                        max_tokens=500,
+                        system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
+                        messages=[{"role": "user", "content": f"问题：{prompt}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
+                    )
+                    text = ""
+                    for block in resp.content:
+                        if hasattr(block, "text") and block.text:
+                            text += block.text
+                    llm_plan = validate_llm_plan(text)
+                    if llm_plan:
+                        plan = merge_llm_plan(plan, llm_plan)
+            except Exception:
+                pass  # Fallback: keep rule planner result
 
         with st.spinner("搜索中..."):
             src = search_sourcebot(prompt) if use_sourcebot else []

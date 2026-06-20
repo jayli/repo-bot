@@ -32,3 +32,18 @@ def test_location_query_skips_precision_by_default():
 
     assert plan.intent == "implementation_location"
     assert plan.precision["enabled"] is False
+
+
+def test_validate_llm_planner_rejects_non_json():
+    planner = load_planner()
+
+    assert planner.validate_llm_plan("not json") == {}
+
+
+def test_merge_llm_plan_adds_queries_without_replacing_intent():
+    planner = load_planner()
+    base = planner.plan_query("block-proxy 是怎样依赖 anyproxy 的")
+    merged = planner.merge_llm_plan(base, {"query_rewrites": {"sourcebot": ["ProxyServer"]}})
+
+    assert merged.intent == "dependency_relation"
+    assert "ProxyServer" in merged.queries["sourcebot"]

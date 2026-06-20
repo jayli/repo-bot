@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import replace
+from typing import Any
 
 from .models import RetrievalPlan
 
@@ -62,3 +65,38 @@ def plan_query(query: str) -> RetrievalPlan:
             "read_manifests": intent == "dependency_relation",
         },
     )
+
+
+def validate_llm_plan(text: str) -> dict[str, Any]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _extend_unique(current: list[Any], extra: list[Any], limit: int = 8) -> list[Any]:
+    result = list(current)
+    for item in extra:
+        if item not in result:
+            result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def merge_llm_plan(base: RetrievalPlan, llm_plan: dict[str, Any]) -> RetrievalPlan:
+    queries = {key: list(value) for key, value in base.queries.items()}
+    rewrites = llm_plan.get("query_rewrites", {})
+    if isinstance(rewrites, dict):
+        for key in ["sourcebot", "qdrant"]:
+            extra = rewrites.get(key)
+            if isinstance(extra, list):
+                queries[key] = _extend_unique(queries.get(key, []), extra)
+    precision = dict(base.precision)
+    extra_precision = llm_plan.get("precision_search", {})
+    if isinstance(extra_precision, dict) and isinstance(extra_precision.get("extra_patterns"), list):
+        precision["patterns"] = _extend_unique(list(precision.get("patterns", [])), extra_precision["extra_patterns"])
+    return replace(base, queries=queries, precision=precision)
