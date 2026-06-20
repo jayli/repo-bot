@@ -7,6 +7,12 @@ from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
+from retrieval.planner import plan_query
+from retrieval.ranking import rank_repositories, should_run_precision_search
+from retrieval.precision import grep_repo, read_file_window, read_manifest
+from retrieval.evidence import build_evidence_pack
+from retrieval.models import RetrievalHit
+from prompts.synthesizer import build_system_prompt, build_user_message
 load_dotenv()
 
 import hashlib
@@ -137,6 +143,21 @@ def read_file_content(repo: str, path: str, start_line: int, end_line: int) -> s
         return "".join(lines[max(0, start_line - 1):end_line])
     except Exception:
         return ""
+
+def to_hits(results: list[dict], source: str) -> list[RetrievalHit]:
+    hits = []
+    for r in results:
+        line = r.get("line") or f"L{r.get('start_line', 1)}"
+        hits.append(RetrievalHit(
+            source=source,
+            repo=r.get("repo", ""),
+            path=r.get("path", ""),
+            line_range=line,
+            content=r.get("content", ""),
+            strength="exact_text" if source == "sourcebot" else "semantic",
+            score=r.get("score"),
+        ))
+    return hits
 
 def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
     k = 60
@@ -364,6 +385,36 @@ def ask_llm(question: str, ctx_json: str, history: list[dict] | None = None) -> 
             return block.text
     return "(模型未生成文本回答，可能只返回了 thinking block)"
 
+def ask_llm_with_evidence(question: str, evidence_pack: dict, history: list[dict] | None = None) -> str:
+    import anthropic, httpx
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    if not api_key:
+        return "❌ 未配置 ANTHROPIC_API_KEY"
+    if not evidence_pack.get("evidence"):
+        return "未找到足够相关代码证据，请尝试更精确的搜索词。"
+
+    messages: list[dict] = []
+    if history:
+        messages.extend(history[-10:])
+    messages.append({"role": "user", "content": build_user_message(question, evidence_pack)})
+
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client_kwargs["http_client"] = httpx.Client(verify=False)
+    client = anthropic.Anthropic(**client_kwargs)
+    resp = client.messages.create(
+        model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+        max_tokens=3000,
+        system=build_system_prompt(evidence_pack.get("answer_template", "generic_code_answer")),
+        messages=messages,
+    )
+    for block in resp.content:
+        if hasattr(block, "text") and block.text:
+            return block.text
+    return "(模型未生成文本回答，可能只返回了 thinking block)"
+
 # === 主界面 ===
 if "messages" not in st.session_state:
     token = st.session_state.get("_session_token")
@@ -385,6 +436,8 @@ if prompt := st.chat_input("输入你的问题..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        plan = plan_query(prompt)
+
         with st.spinner("搜索中..."):
             src = search_sourcebot(prompt) if use_sourcebot else []
             qdr = search_qdrant(prompt) if use_qdrant else []
@@ -398,6 +451,26 @@ if prompt := st.chat_input("输入你的问题..."):
 
         ast_facts = search_ast_structure(prompt, merged) if use_ast else []
         graph_facts = search_graph_relations(prompt, merged) if use_graph else []
+
+        # Build typed hits for ranking and evidence
+        hits = to_hits(src, "sourcebot") + to_hits(qdr, "qdrant")
+        for fact in ast_facts:
+            hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
+        for fact in graph_facts:
+            hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
+        ranked_repos = rank_repositories(hits)
+
+        # Precision search for complex queries
+        repos_root = os.environ.get("REPOS_ROOT", "/repos")
+        if should_run_precision_search(plan, ranked_repos):
+            top_repo = ranked_repos[0]["repo"]
+            try:
+                if plan.precision.get("read_manifests"):
+                    hits.extend(read_manifest(repos_root, top_repo))
+                for pattern in plan.precision.get("patterns", [])[:5]:
+                    hits.extend(grep_repo(repos_root, top_repo, pattern, max_matches=10))
+            except Exception as exc:
+                st.warning(f"精搜过程出错: {exc}")
 
         # 构建来源统计标题
         src_parts = [f"{len(src)} Sourcebot", f"{len(qdr)} Qdrant"]
@@ -432,29 +505,43 @@ if prompt := st.chat_input("输入你的问题..."):
                     st.caption("未找到相关调用链")
 
         with st.spinner("LLM 思考中..."):
-            ctx_items = [{
-                "repo": r["repo"], "path": r["path"], "line": r["line"],
-                "language": r.get("language", ""), "content": r.get("content", ""),
-            } for r in merged]
-            if ast_facts:
-                ctx_items.append({
-                    "repo": "ast-service",
-                    "path": "structure",
-                    "line": "",
-                    "language": "text",
-                    "content": "\n".join(ast_facts),
-                })
-            if graph_facts:
-                ctx_items.append({
-                    "repo": "ast-service",
-                    "path": "graph",
-                    "line": "",
-                    "language": "text",
-                    "content": "\n".join(graph_facts),
-                })
-            ctx_json = json.dumps(ctx_items)
+            evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos)
             history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
-            answer = ask_llm(prompt, ctx_json, history)
+            try:
+                answer = ask_llm_with_evidence(prompt, evidence_pack, history)
+            except Exception:
+                # Fallback to old flat answer path
+                ctx_items = [{
+                    "repo": r["repo"], "path": r["path"], "line": r["line"],
+                    "language": r.get("language", ""), "content": r.get("content", ""),
+                } for r in merged]
+                if ast_facts:
+                    ctx_items.append({
+                        "repo": "ast-service",
+                        "path": "structure",
+                        "line": "",
+                        "language": "text",
+                        "content": "\n".join(ast_facts),
+                    })
+                if graph_facts:
+                    ctx_items.append({
+                        "repo": "ast-service",
+                        "path": "graph",
+                        "line": "",
+                        "language": "text",
+                        "content": "\n".join(graph_facts),
+                    })
+                ctx_json = json.dumps(ctx_items)
+                answer = ask_llm(prompt, ctx_json, history)
+
+        with st.expander(f"📊 Evidence Pack ({evidence_pack.get('confidence', '-')})", expanded=False):
+            st.json({
+                "intent": evidence_pack.get("intent"),
+                "candidate_repos": evidence_pack.get("candidate_repos", [])[:5],
+                "retrieval_coverage": evidence_pack.get("retrieval_coverage"),
+                "evidence_count": len(evidence_pack.get("evidence", [])),
+            })
+
         st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
         _persist_messages()

@@ -12,6 +12,8 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --retries 10 --timeout 120 -r requirements.txt
 COPY app.py sourcebot_client.py ./
+COPY retrieval ./retrieval
+COPY prompts ./prompts
 
 EXPOSE 8501
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0"]
