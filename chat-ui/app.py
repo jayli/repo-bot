@@ -90,7 +90,9 @@ with st.sidebar:
     use_qdrant = st.checkbox("Qdrant 语义搜索（向量库）", value=True)
     use_sourcebot = st.checkbox("Sourcebot 精确搜索（匹配关键词）", value=True)
     use_ast = st.checkbox("AST 结构检索", value=True)
+    use_graph = st.checkbox("Neo4j 图关系检索", value=True)
     st.caption(f"AST: {os.environ.get('AST_SERVICE_URL', 'http://ast-service:8502')}")
+    st.caption(f"Neo4j: {os.environ.get('NEO4J_URI', 'bolt://localhost:7687')} ({os.environ.get('NEO4J_DATABASE', 'neo4j')})")
     st.divider()
     if st.button("🆕 新对话", use_container_width=True):
         token = st.session_state.get("_session_token")
@@ -197,7 +199,130 @@ def search_ast_structure(query: str, results: list[dict], limit: int = 8) -> lis
                         return facts
             except Exception:
                 continue
+
+    # Fallback: 按 repo 查询 top symbols（比无差别调用更有信息量）
+    if not facts:
+        repos = [r.get("repo") for r in results if r.get("repo")]
+        repos = list(dict.fromkeys(repos))[:3]
+        for repo in repos:
+            try:
+                resp = requests.get(f"{url}/symbols", params={"repo": repo, "limit": limit}, timeout=3)
+                resp.raise_for_status()
+                for sym in resp.json().get("symbols", []):
+                    fact = (
+                        f"[structure] {sym.get('name')} ({sym.get('kind', '')}) defined at "
+                        f"{sym.get('repo')}/{sym.get('path')}:L{sym.get('start_line')}"
+                    )
+                    if fact not in seen:
+                        seen.add(fact)
+                        facts.append(fact)
+                    if len(facts) >= limit:
+                        return facts
+            except Exception:
+                continue
     return facts
+
+def search_graph_relations(query: str, results: list[dict], limit: int = 12) -> list[str]:
+    import requests
+
+    url = os.environ.get("AST_SERVICE_URL", "http://ast-service:8502").rstrip("/")
+    symbols = candidate_symbols(query, results, limit=6)
+    facts: list[str] = []
+    seen: set[str] = set()
+
+    repos = [r.get("repo") for r in results if r.get("repo")]
+    repos = list(dict.fromkeys(repos))[:3]
+
+    # 候选符号匹配
+    for name in symbols:
+        for repo in repos:
+            if not repo:
+                continue
+            try:
+                resp = requests.get(
+                    f"{url}/graph/impact",
+                    params={"repo": repo, "symbol": name, "depth": 2, "limit": 8},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                for fact_item in resp.json().get("facts", []):
+                    node = fact_item.get("node", {})
+                    dist = fact_item.get("distance", 0)
+                    node_name = node.get("name", "?")
+                    node_kind = node.get("kind", "")
+                    node_path = node.get("path", "")
+                    loc = f"{repo}/{node_path}" if node_path else repo
+                    if dist > 0:
+                        desc = (
+                            f"[graph] {name} calls {node_name}"
+                            + (f"({node_kind})" if node_kind else "")
+                            + f" (depth {dist}) in {loc}"
+                        )
+                    else:
+                        desc = (
+                            f"[graph] {node_name}"
+                            + (f"({node_kind})" if node_kind else "")
+                            + f" calls {name} (depth {-dist}) in {loc}"
+                        )
+                    if desc not in seen:
+                        seen.add(desc)
+                        facts.append(desc)
+                    if len(facts) >= limit:
+                        return facts
+            except Exception:
+                continue
+
+    # Fallback: 先查 repo 内 top symbols，再查影响关系
+    if not facts:
+        for repo in repos:
+            if not repo:
+                continue
+            try:
+                sym_resp = requests.get(
+                    f"{url}/symbols",
+                    params={"repo": repo, "limit": 5},
+                    timeout=3,
+                )
+                sym_resp.raise_for_status()
+                top_names = [s["name"] for s in sym_resp.json().get("symbols", [])]
+            except Exception:
+                continue
+            for name in top_names:
+                try:
+                    resp = requests.get(
+                        f"{url}/graph/impact",
+                        params={"repo": repo, "symbol": name, "depth": 2, "limit": 5},
+                        timeout=5,
+                    )
+                    resp.raise_for_status()
+                    for fact_item in resp.json().get("facts", []):
+                        node = fact_item.get("node", {})
+                        dist = fact_item.get("distance", 0)
+                        node_name = node.get("name", "?")
+                        node_kind = node.get("kind", "")
+                        node_path = node.get("path", "")
+                        loc = f"{repo}/{node_path}" if node_path else repo
+                        if dist > 0:
+                            desc = (
+                                f"[graph] {name} calls {node_name}"
+                                + (f"({node_kind})" if node_kind else "")
+                                + f" (depth {dist}) in {loc}"
+                            )
+                        else:
+                            desc = (
+                                f"[graph] {node_name}"
+                                + (f"({node_kind})" if node_kind else "")
+                                + f" calls {name} (depth {-dist}) in {loc}"
+                            )
+                        if desc not in seen:
+                            seen.add(desc)
+                            facts.append(desc)
+                        if len(facts) >= limit:
+                            return facts
+                except Exception:
+                    continue
+    return facts
+
 
 def ask_llm(question: str, ctx_json: str, history: list[dict] | None = None) -> str:
     import anthropic, httpx
@@ -272,8 +397,17 @@ if prompt := st.chat_input("输入你的问题..."):
                     r.get("start_line", 1), r.get("end_line", r.get("start_line", 1) + 30))
 
         ast_facts = search_ast_structure(prompt, merged) if use_ast else []
+        graph_facts = search_graph_relations(prompt, merged) if use_graph else []
 
-        with st.expander(f"📎 检索到 {len(merged)} 条 ({len(src)} Sourcebot + {len(qdr)} Qdrant)", expanded=False):
+        # 构建来源统计标题
+        src_parts = [f"{len(src)} Sourcebot", f"{len(qdr)} Qdrant"]
+        if use_ast:
+            src_parts.append(f"{len(ast_facts)} AST")
+        if use_graph:
+            src_parts.append(f"{len(graph_facts)} Neo4j")
+        src_title = " + ".join(src_parts)
+
+        with st.expander(f"📎 检索到 {len(merged)} 条 ({src_title})", expanded=False):
             if st.session_state.get("sourcebot_error"):
                 st.warning(st.session_state.sourcebot_error)
             for r in merged:
@@ -281,10 +415,21 @@ if prompt := st.chat_input("输入你的问题..."):
                 if r.get("content"):
                     st.code(r["content"][:2000], language=r.get("language", ""))
 
-        if ast_facts:
-            with st.expander(f"结构上下文 {len(ast_facts)} 条", expanded=False):
-                for fact in ast_facts:
-                    st.caption(fact)
+        if use_ast:
+            with st.expander(f"AST 结构上下文 {len(ast_facts)} 条", expanded=False):
+                if ast_facts:
+                    for fact in ast_facts:
+                        st.caption(fact)
+                else:
+                    st.caption("未找到相关结构信息")
+
+        if use_graph:
+            with st.expander(f"Neo4j 图关系上下文 {len(graph_facts)} 条", expanded=False):
+                if graph_facts:
+                    for fact in graph_facts:
+                        st.caption(fact)
+                else:
+                    st.caption("未找到相关调用链")
 
         with st.spinner("LLM 思考中..."):
             ctx_items = [{
@@ -298,6 +443,14 @@ if prompt := st.chat_input("输入你的问题..."):
                     "line": "",
                     "language": "text",
                     "content": "\n".join(ast_facts),
+                })
+            if graph_facts:
+                ctx_items.append({
+                    "repo": "ast-service",
+                    "path": "graph",
+                    "line": "",
+                    "language": "text",
+                    "content": "\n".join(graph_facts),
                 })
             ctx_json = json.dumps(ctx_items)
             history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]

@@ -244,13 +244,13 @@ def query_impact(driver, database: str, repo: str, symbol: str, depth: int, limi
         return []
     cypher = """
     MATCH (s:Symbol {repo: $repo, name: $symbol})
-    CALL {
-      WITH s
-      MATCH path = (s)-[:CALLS*1..%d]->(target:Symbol {repo: $repo})
+    CALL (s) {
+      MATCH path = (s)-[:CALLS*1..%d]->(target)
+      WHERE target.repo = $repo AND (target:Symbol OR target:ExternalSymbol)
       RETURN target, length(path) AS dist
       UNION
-      WITH s
-      MATCH path = (s)<-[:CALLS*1..%d]-(caller:Symbol {repo: $repo})
+      MATCH path = (s)<-[:CALLS*1..%d]-(caller)
+      WHERE caller.repo = $repo AND (caller:Symbol OR caller:ExternalSymbol)
       RETURN caller AS target, -length(path) AS dist
     }
     RETURN target, dist
@@ -265,7 +265,8 @@ def query_call_paths(driver, database: str, repo: str, from_symbol: str, to_symb
     if driver is None:
         return []
     cypher = """
-    MATCH path = (s:Symbol {repo: $repo, name: $from})-[rels:CALLS*1..%d]->(t:Symbol {repo: $repo, name: $to})
+    MATCH path = (s:Symbol {repo: $repo, name: $from})-[rels:CALLS*1..%d]->(t)
+    WHERE t.repo = $repo AND (t:Symbol OR t:ExternalSymbol) AND t.name = $to
     RETURN path
     LIMIT $limit
     """ % max_depth
