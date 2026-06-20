@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
 from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
 from retrieval.ranking import rank_repositories, should_run_precision_search
-from retrieval.precision import grep_repo, read_file_window, read_manifest
+from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read
 from retrieval.evidence import build_evidence_pack
 from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
@@ -498,7 +498,24 @@ if prompt := st.chat_input("输入你的问题..."):
                 if plan.precision.get("read_manifests"):
                     hits.extend(read_manifest(repos_root, top_repo))
                 for pattern in plan.precision.get("patterns", [])[:5]:
-                    hits.extend(grep_repo(repos_root, top_repo, pattern, max_matches=10))
+                    hits.extend(local_tool_grep(
+                        repos_root, top_repo, pattern,
+                        include=["*.js", "*.ts", "*.tsx", "*.jsx", "*.py", "*.json", "*.toml", "*.yaml", "*.yml"],
+                        exclude=["node_modules/*", "vendor/*", "dist/*", "build/*", ".git/*"],
+                        max_matches=10, context_lines=1,
+                    ))
+                # 对 grep 命中和 merged 结果中排名最高的文件做精读
+                seen_paths: set[str] = set()
+                for hit in hits:
+                    if hit.source in ("local_tool", "sourcebot") and hit.repo == top_repo:
+                        file_key = f"{hit.repo}:{hit.path}"
+                        if file_key not in seen_paths:
+                            seen_paths.add(file_key)
+                            rh = local_tool_read(repos_root, top_repo, hit.path, max_lines=200)
+                            if rh:
+                                hits.append(rh)
+                        if len(seen_paths) >= 3:
+                            break
             except Exception as exc:
                 st.warning(f"精搜过程出错: {exc}")
 
