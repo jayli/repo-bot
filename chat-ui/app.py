@@ -52,7 +52,8 @@ if not st.session_state.authenticated:
     with st.form("login_form"):
         username = st.text_input("用户名")
         password = st.text_input("密码", type="password")
-        if st.form_submit_button("登录"):
+        submitted = st.form_submit_button("登录")
+        if submitted:
             env_user = os.environ.get("CHAT_USERNAME", "admin")
             env_pass = os.environ.get("CHAT_PASSWORD", "admin123")
             if username == env_user and password == env_pass:
