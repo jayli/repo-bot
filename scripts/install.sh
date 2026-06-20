@@ -29,7 +29,7 @@ ARCH=$(detect_arch)
 check_prerequisites() {
   echo ""
   echo "========================================"
-  echo " Step 1/6: 环境检查"
+  echo " Step 1/7: 环境检查"
   echo "========================================"
 
   info "系统架构: ${ARCH}"
@@ -81,7 +81,7 @@ check_prerequisites() {
 collect_config() {
   echo ""
   echo "========================================"
-  echo " Step 2/6: 配置参数"
+  echo " Step 2/7: 配置参数"
   echo "========================================"
   echo "按 Enter 使用默认值"
   echo ""
@@ -206,11 +206,19 @@ SOURCEBOT_ORG_DOMAIN=~
 CHAT_USERNAME=${CHAT_USERNAME}
 CHAT_PASSWORD=${CHAT_PASSWORD}
 
+# === AST 结构检索 ===
+AST_SERVICE_URL=http://localhost:8502
+
 # === Neo4j 图关系索引 ===
 NEO4J_ENABLED=${NEO4J_ENABLED}
+NEO4J_IMAGE=neo4j:5-community
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=${NEO4J_PASSWORD}
+NEO4J_DATABASE=neo4j
+NEO4J_HEAP_INITIAL=512m
+NEO4J_HEAP_MAX=2G
+NEO4J_PAGECACHE=1G
 
 # === 代码仓库根目录 ===
 REPOS_ROOT=${REPOS_ROOT}
@@ -225,7 +233,7 @@ ENVEOF
 pull_images() {
   echo ""
   echo "========================================"
-  echo " Step 3/6: 拉取 Docker 镜像"
+  echo " Step 3/7: 拉取 Docker 镜像"
   echo "========================================"
 
   info "拉取 qdrant/qdrant:latest ..."
@@ -254,7 +262,7 @@ pull_images() {
 generate_files() {
   echo ""
   echo "========================================"
-  echo " Step 4/6: 生成配置文件"
+  echo " Step 4/7: 生成配置文件"
   echo "========================================"
 
   # 读取 REPOS_ROOT
@@ -413,7 +421,7 @@ COMPOSEEOF
 start_services() {
   echo ""
   echo "========================================"
-  echo " Step 5/6: 启动服务"
+  echo " Step 5/7: 启动服务"
   echo "========================================"
 
   cd "${INSTALL_DIR}"
@@ -475,19 +483,86 @@ start_services() {
 }
 
 # ============================
-# Step 6: 数据索引
+# Step 6: Sourcebot API Key
+# ============================
+setup_sourcebot_key() {
+  echo ""
+  echo "========================================"
+  echo " Step 6/7: Sourcebot API Key"
+  echo "========================================"
+
+  local env_file="${INSTALL_DIR}/.env"
+  local has_key=""
+  # shellcheck disable=SC1090
+  [ -f "${env_file}" ] && source "${env_file}" && has_key="${SOURCEBOT_API_KEY:-}"
+
+  if [ -n "${has_key}" ]; then
+    info "检测到 SOURCEBOT_API_KEY 已配置，跳过"
+    return
+  fi
+
+  echo ""
+  info "Sourcebot 需要后台注册管理员并创建 API Key，Chat UI 才能后台搜索代码。"
+  echo ""
+  echo "  首次访问 Sourcebot 时需自行注册，请设定一个邮箱和密码（如 admin@local）。"
+  echo ""
+  read -r -p "  按 Enter 打开 Sourcebot 注册/登录页面 ..." _dummy
+
+  if command -v open &>/dev/null; then
+    open "http://localhost:3000"
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:3000"
+  fi
+
+  echo ""
+  echo "  操作步骤:"
+  echo "    1. 首次使用需注册管理员账号（邮箱 + 密码，自行设定）"
+  echo "    2. 注册后进入 Settings → API Keys，点击创建 API Key"
+  echo "    3. 复制生成的 Key（仅显示一次！）"
+
+  read -r -p "  粘贴 API Key（直接按 Enter 跳过，后续可手动编辑 .env）: " api_key
+
+  if [ -n "${api_key}" ]; then
+    # 去掉首尾空白
+    api_key=$(echo "${api_key}" | xargs)
+    if [ -n "${api_key}" ]; then
+      # 追加到 .env
+      if grep -q '^SOURCEBOT_API_KEY=' "${env_file}" 2>/dev/null; then
+        # 替换已有行
+        if [ "$(uname)" = "Darwin" ]; then
+          sed -i '' "s|^SOURCEBOT_API_KEY=.*|SOURCEBOT_API_KEY=${api_key}|" "${env_file}"
+        else
+          sed -i "s|^SOURCEBOT_API_KEY=.*|SOURCEBOT_API_KEY=${api_key}|" "${env_file}"
+        fi
+      else
+        echo "SOURCEBOT_API_KEY=${api_key}" >> "${env_file}"
+      fi
+      info "API Key 已写入 ${env_file}"
+      info "正在重启 chat-ui 以加载新 Key ..."
+      docker compose -f "${INSTALL_DIR}/docker-compose.yml" up -d chat-ui || true
+    fi
+  else
+    warn "跳过 API Key 设置"
+    echo "  可稍后编辑 ${INSTALL_DIR}/.env，添加:"
+    echo "    SOURCEBOT_API_KEY=<你的Key>"
+    echo "  然后重启: docker compose -f ${INSTALL_DIR}/docker-compose.yml up -d chat-ui"
+  fi
+}
+
+# ============================
+# Step 7: 数据索引
 # ============================
 run_indexing() {
   echo ""
   echo "========================================"
-  echo " Step 6/6: 数据索引"
+  echo " Step 7/7: 数据索引"
   echo "========================================"
 
   echo ""
   info "首次启动完成！接下来需要初始化数据索引："
   echo ""
   echo "  1. Sourcebot 后台索引："
-  echo "     访问 http://localhost:3000 注册管理员，然后进入仓库管理触发 reindex"
+  echo "     访问 http://localhost:3000 进入仓库管理触发 reindex"
   echo "     （Sourcebot 会扫描 /repos 下所有仓库并构建 trigram 索引）"
   echo ""
   echo "  2. 向量索引（chat-ui 语义搜索）："
@@ -543,6 +618,7 @@ main() {
   pull_images
   generate_files
   start_services
+  setup_sourcebot_key
   run_indexing
 
   echo ""
@@ -551,15 +627,12 @@ main() {
   echo ""
   echo "  访问地址:"
   echo "    Chat UI:     http://localhost:8501"
-  echo "    Sourcebot:   http://localhost:3000  (注册管理员 + 设置 API Key)"
+  echo "    Sourcebot:   http://localhost:3000"
   echo "    Qdrant:      http://localhost:6333/dashboard"
   echo "    AST API:     http://localhost:8502/docs"
   echo "    Neo4j:       http://localhost:7474  (neo4j / 你的密码)"
   echo ""
-  echo "  后续操作:"
-  echo "    1. 在 Sourcebot 设置页创建 API Key 并更新到 ${INSTALL_DIR}/.env"
-  echo "    2. 重启 chat-ui: docker compose -f ${INSTALL_DIR}/docker-compose.yml up -d chat-ui"
-  echo "    3. 核心命令: cd ${INSTALL_DIR} && docker compose <cmd>"
+  echo "  核心命令: cd ${INSTALL_DIR} && docker compose <cmd>"
   echo "================================================"
 }
 

@@ -125,7 +125,7 @@ npm run index:ast # 构建 AST 索引
 
 ```
 repo-bot/
-├── docker-compose.yml              # 四服务编排
+├── docker-compose.yml              # 五服务编排
 ├── package.json                    # npm run 命令入口
 ├── .env.example                    # 环境变量模板
 ├── config/

@@ -88,8 +88,8 @@ REPOS_ROOT (只读挂载 :ro)
     │   pytest 测试（API / DB / 索引 / SCIP / normalizer / 扫描器 / graph）
     │
     └─ Chat UI (Streamlit :8501) — chat-ui/app.py
-        侧边栏可独立开关三路搜索（Qdrant / Sourcebot / AST 结构检索）
-        三路结果 RRF 融合 + AST 调用关系作为结构上下文喂 LLM
+        侧边栏可独立开关四路检索（Qdrant / Sourcebot / AST / Neo4j 图谱）
+        结果 RRF 融合 + AST 定义 + Neo4j 多跳调用链作为结构上下文喂 LLM
         支持多轮对话（最近 10 轮送 LLM），会话以 URL token 持久化在服务端
 ```
 
@@ -109,9 +109,11 @@ REPOS_ROOT (只读挂载 :ro)
 - **Qdrant API**：新版 qdrant-client 用 `client.query_points(collection, query=vector, limit=n)`，返回 `.points`。
 - **DashScope 限制**：单次请求 ≤ 10 条、总字符 ≤ ~33000 → `index_code.py` 动态分批 + 单条截断 2000 字符。
 - **容器内路径**：代码仓库在容器内挂载为 `/repos`，通过 `REPOS_ROOT` 环境变量控制。
-- **ast-service 测试**：在 `ast-service/` 目录下执行 `python -m pytest -v`（28 个测试）。测试不依赖数据库文件，用 fixture 仓库和内存 SQLite。
+- **ast-service 测试**：在 `ast-service/` 目录下执行 `python -m pytest -v`（50 个测试）。测试不依赖数据库文件，用 fixture 仓库和内存 SQLite。
 - **SCIP protobuf**：`ast-service/scip_proto/scip_pb2.py` 由真实 `scip.proto` 通过 `grpc_tools.protoc` 生成，非手写 stub。导出端点 `/scip/export?repo=xxx` 返回有效 SCIP payload，可被 `scip_pb2.Index.ParseFromString()` 反序列化。
 - **调用图链接**：`link_calls_in_file()` 按符号行范围窄先匹配（防外层类覆盖内层方法），`link_callee_symbols()` 跨文件按名称匹配。
 - **Docker 镜像发布**：chat-ui / ast-service 推送到阿里云 ACR 个人版 `crpi-x1zji86f6jpcd7t1.cn-hangzhou.personal.cr.aliyuncs.com/lijing00333/`。单平台镜像用 `latest-amd64` / `latest-arm64` 标签，双平台用 `latest` manifest。Qdrant 和 Sourcebot 为公共镜像，不纳入构建发布流程。
 - **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot/neo4j 来自 Docker Hub/GHCR）。
 - **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。
+- **Chat UI 图检索**：`search_graph_relations()` 通过 `/graph/impact` 查询多跳调用链，两级 fallback：候选符号匹配 → `/symbols?repo=X` 取 top symbols → 逐个查 impact。`query_impact` 和 `query_call_paths` 同时匹配 `Symbol` 和 `ExternalSymbol` 标签（未解析调用目标是 ExternalSymbol）。CALL 子查询使用 `CALL (s) { ... }` 语法（Neo4j 5.x），非旧式 `CALL { WITH s ... }`。
+- **本地开发 SQLite 同步**：`dev` / `dev:ast` 脚本启动时自动检测 `.data/ast.sqlite`，若为空则从容器 `docker cp repo-bot-ast-service-1:/data/ast.sqlite` 同步到宿主机。
