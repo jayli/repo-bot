@@ -80,6 +80,28 @@ def get_qdrant_client():
     from qdrant_client import QdrantClient
     return QdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"))
 
+@st.cache_resource
+def get_indexed_repos() -> list[str]:
+    import itertools
+    try:
+        client = get_qdrant_client()
+        collection = os.environ.get("QDRANT_COLLECTION", "codebase")
+        repos: set[str] = set()
+        # scroll first ~5000 points to collect unique repo names
+        points, next_offset = client.scroll(collection, limit=1000)
+        for i in range(5):
+            for p in points:
+                repo = p.payload.get("repo", "")
+                if repo:
+                    repos.add(repo)
+            if next_offset:
+                points, next_offset = client.scroll(collection, limit=1000, offset=next_offset)
+            else:
+                break
+        return sorted(repos)
+    except Exception:
+        return []
+
 def embed_query(text: str) -> list[float]:
     client = get_openai_client()
     model = os.environ.get("EMBEDDING_MODEL", "text-embedding-v4")
@@ -456,6 +478,7 @@ if prompt := st.chat_input("输入你的问题..."):
                 local_tool_grep=local_tool_grep,
                 local_tool_read=local_tool_read,
                 llm_plan=llm_plan_query,
+                available_repos=get_indexed_repos(),
             )
             result = run_retrieval_loop(
                 prompt,
@@ -522,7 +545,7 @@ if prompt := st.chat_input("输入你的问题..."):
                     st.caption("未找到相关调用链")
 
         with st.spinner("LLM 思考中..."):
-            evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos)
+            evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos, available_repos=get_indexed_repos())
             history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
             try:
                 answer = ask_llm_with_evidence(prompt, evidence_pack, history)

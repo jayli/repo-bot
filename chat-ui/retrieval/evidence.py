@@ -58,7 +58,7 @@ def _repo_roots(hits: list[RetrievalHit], ranked_repos: list[dict]) -> dict[str,
     return {repo: os.path.join(repos_root, repo) for repo in repos[:10]}
 
 
-def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit], ranked_repos: list[dict]) -> dict:
+def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit], ranked_repos: list[dict], available_repos: list[str] | None = None) -> dict:
     evidence: list[EvidenceItem] = []
     for idx, hit in enumerate(hits[:30], start=1):
         evidence.append(
@@ -73,13 +73,16 @@ def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit
                 content=hit.content[:4000],
             )
         )
+    repo_roots = _repo_roots(hits, ranked_repos)
+    if available_repos:
+        repo_roots.setdefault("_available", sorted(set(available_repos) - SYNTHETIC_REPOS))
     return {
         "query": query,
         "intent": plan.intent,
         "answer_template": plan.template,
         "entities": plan.entities,
         "candidate_repos": ranked_repos,
-        "repo_roots": _repo_roots(hits, ranked_repos),
+        "repo_roots": repo_roots,
         "evidence": [item.to_dict() for item in evidence],
         "confidence": _confidence(evidence),
     }

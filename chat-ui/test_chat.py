@@ -69,6 +69,31 @@ def _get_qdrant_client():
         _qdrant_client = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     return _qdrant_client
 
+_indexed_repos_cache: list[str] | None = None
+
+def get_indexed_repos() -> list[str]:
+    global _indexed_repos_cache
+    if _indexed_repos_cache is not None:
+        return _indexed_repos_cache
+    try:
+        client = _get_qdrant_client()
+        collection = os.environ.get("QDRANT_COLLECTION", "codebase")
+        repos: set[str] = set()
+        points, next_offset = client.scroll(collection, limit=1000)
+        for i in range(5):
+            for p in points:
+                repo = p.payload.get("repo", "")
+                if repo:
+                    repos.add(repo)
+            if next_offset:
+                points, next_offset = client.scroll(collection, limit=1000, offset=next_offset)
+            else:
+                break
+        _indexed_repos_cache = sorted(repos)
+    except Exception:
+        _indexed_repos_cache = []
+    return _indexed_repos_cache
+
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     client = _get_qdrant_client()
     vector = embed_query(query)
@@ -378,15 +403,22 @@ def _dispatch_tool(name: str, args: dict, evidence_pack: dict) -> str:
     repo_roots_map = evidence_pack.get("repo_roots", {})
     evidence_items = evidence_pack.get("evidence", [])
 
-    def _find_repo_root(repo: str) -> str:
-        path = repo_roots_map.get(repo)
-        if path and os.path.isdir(path):
-            return path
-        # Fallback: try all repos_root entries
-        for r, p in repo_roots_map.items():
-            if r == repo and os.path.isdir(p):
-                return p
-        return ""
+    def _resolve_repo(repo: str) -> str | None:
+        """Map a repo name (possibly full github URL) to the short name that exists on disk."""
+        if repo in repo_roots_map and os.path.isdir(repo_roots_map[repo]):
+            return repo
+        # Try last path component: github.com/XTLS/Xray-core → Xray-core
+        short = repo.rsplit("/", 1)[-1]
+        if short in repo_roots_map and os.path.isdir(repo_roots_map[short]):
+            return short
+        # Try direct filesystem check
+        if os.path.isdir(os.path.join(REPOS_ROOT, short)):
+            return short
+        # Fuzzy scan
+        for key in repo_roots_map:
+            if (repo.endswith("/" + key) or key.endswith("/" + repo)) and os.path.isdir(repo_roots_map[key]):
+                return key
+        return None
 
     def _evidence_as_results() -> list[dict]:
         return [{"repo": e.get("repo", ""), "path": e.get("path", ""), "content": e.get("content", "")} for e in evidence_items]
@@ -417,13 +449,15 @@ def _dispatch_tool(name: str, args: dict, evidence_pack: dict) -> str:
 
     elif name == "read_manifest":
         repo = args["repo"]
-        root = _find_repo_root(repo) or REPOS_ROOT
-        hits = read_manifest(root, repo)
+        resolved = _resolve_repo(repo)
+        hits = read_manifest(REPOS_ROOT, resolved) if resolved else []
         return json.dumps([{"path": h.path, "content": h.content[:500]} for h in hits], ensure_ascii=False) if hits else "(未找到 manifest)"
 
     elif name == "local_tool_grep":
         repo = args["repo"]
-        root = _find_repo_root(repo) or REPOS_ROOT
+        resolved = _resolve_repo(repo)
+        if not resolved:
+            return f"(仓库 '{repo}' 不在索引中)"
         kwargs = {"pattern": args["pattern"], "max_matches": 20}
         if args.get("include"):
             kwargs["include"] = args["include"]
@@ -431,24 +465,28 @@ def _dispatch_tool(name: str, args: dict, evidence_pack: dict) -> str:
             kwargs["exclude"] = args["exclude"]
         if args.get("context_lines") is not None:
             kwargs["context_lines"] = args["context_lines"]
-        hits = local_tool_grep(root, repo, **kwargs)
+        hits = local_tool_grep(REPOS_ROOT, resolved, **kwargs)
         return json.dumps([{"path": h.path, "line_range": h.line_range, "content": h.content[:200]} for h in hits[:10]], ensure_ascii=False) if hits else "(无匹配)"
 
     elif name == "local_tool_read":
         repo = args["repo"]
-        root = _find_repo_root(repo) or REPOS_ROOT
-        hit = local_tool_read(root, repo, path=args["path"], start_line=args.get("start_line"), end_line=args.get("end_line"), max_lines=200)
+        resolved = _resolve_repo(repo)
+        if not resolved:
+            return f"(仓库 '{repo}' 不在索引中)"
+        hit = local_tool_read(REPOS_ROOT, resolved, path=args["path"], start_line=args.get("start_line"), end_line=args.get("end_line"), max_lines=200)
         return hit.content[:3000] if hit and hit.content else "(文件不存在或为空)"
 
     elif name == "local_tool_list":
         repo = args["repo"]
-        root = _find_repo_root(repo) or REPOS_ROOT
+        resolved = _resolve_repo(repo)
+        if not resolved:
+            return f"(仓库 '{repo}' 不在索引中)"
         kwargs = {"dir_path": args.get("dir_path", ""), "max_entries": 100}
         if args.get("include"):
             kwargs["include"] = args["include"]
         if args.get("exclude"):
             kwargs["exclude"] = args["exclude"]
-        entries = local_tool_list(root, repo, **kwargs)
+        entries = local_tool_list(REPOS_ROOT, resolved, **kwargs)
         return json.dumps([{"path": e.path, "type": e.metadata.get("type", "?"), "size": e.metadata.get("size", 0)} for e in entries[:30]], ensure_ascii=False) if entries else "(目录为空)"
 
     return f"未知工具: {name}"
@@ -471,9 +509,10 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
     client_kwargs["http_client"] = httpx.Client(verify=False)
     client = anthropic.Anthropic(**client_kwargs)
 
-    max_tool_calls = 15
+    max_rounds = 12
+    last_text = ""
 
-    for _ in range(12):  # max API round-trips
+    for round_n in range(max_rounds):
         resp = client.messages.create(
             model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
             max_tokens=3000,
@@ -492,13 +531,18 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
             if getattr(block, "type", "") == "tool_use":
                 tool_uses.append({"id": block.id, "name": block.name, "input": dict(block.input)})
 
+        last_text = "\n".join(text_parts) if text_parts else ""
+
         # If LLM returned a final text answer (no tool calls), return it
         if not tool_uses:
-            return "\n".join(text_parts) if text_parts else "(模型未生成文本回答)"
+            return last_text if last_text else "(模型未生成文本回答)"
 
         # Guard against runaway tool calls
-        if len(tool_uses) > max_tool_calls:
-            return "(单轮调用过多工具)"
+        if len(tool_uses) > 15:
+            break
+
+        # Execute tool calls
+        assistant_content: list[dict] = []
 
         # Execute tool calls
         assistant_content: list[dict] = []
@@ -531,7 +575,23 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
             user_content.append({"type": "tool_result", "tool_use_id": tr["tool_use_id"], "content": tr["content"]})
         messages.append({"role": "user", "content": user_content})
 
-    return "(达到最大对话轮次)"
+    # Reached max rounds — do a final synthesis call without tools
+    if last_text:
+        print("  ⚠️ 达到最大轮次，基于已有上下文生成最终回答...")
+    messages.append({"role": "user", "content": "请基于以上的所有工具调用结果，给出最终回答。不要再调用工具。"})
+    try:
+        resp = client.messages.create(
+            model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+            max_tokens=3000,
+            system=system,
+            messages=messages,
+        )
+        for block in resp.content:
+            if hasattr(block, "text") and block.text:
+                return block.text
+    except Exception:
+        pass
+    return last_text if last_text else "(达到最大对话轮次)"
 
 # ── LLM Planner Adapter ─────────────────────────────────────────────────────
 
@@ -630,6 +690,7 @@ def main():
         local_tool_grep=_wrapped_local_grep,
         local_tool_read=_wrapped_local_read,
         llm_plan=_wrapped_llm_plan,
+        available_repos=get_indexed_repos(),
     )
 
     print("⏳ 检索中...")
@@ -690,7 +751,7 @@ def main():
         print(f"  Precision: {precision_count} 条精搜结果")
 
     # 8. Evidence pack
-    evidence_pack = build_evidence_pack(question, plan, hits, ranked_repos)
+    evidence_pack = build_evidence_pack(question, plan, hits, ranked_repos, available_repos=get_indexed_repos())
     print(f"\n📊 Evidence Pack: {len(evidence_pack['evidence'])} items  |  confidence={evidence_pack['confidence']}")
 
     # 9. LLM answer

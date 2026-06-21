@@ -19,6 +19,7 @@ class RetrievalBackends:
     local_tool_grep: Callable[..., list[RetrievalHit]]
     local_tool_read: Callable[..., RetrievalHit | None]
     llm_plan: Callable[[str, RetrievalPlan], dict[str, Any]] | None = None
+    available_repos: list[str] | None = None
 
 
 @dataclass
@@ -283,15 +284,20 @@ def _execute_gap_action(action: GapAction, repos_root: str, backends: RetrievalB
     return []
 
 
-def _build_context_for_llm(merged: list[dict], confirmed_repos: set[str], max_items: int = 10) -> str:
+def _build_context_for_llm(merged: list[dict], confirmed_repos: set[str], available_repos: list[str] | None = None, max_items: int = 10) -> str:
     from .ranking import SYNTHETIC_REPOS
 
     lines: list[str] = []
     real_repos = sorted(confirmed_repos - SYNTHETIC_REPOS)
     if real_repos:
-        lines.append(f"已确认仓库: {', '.join(real_repos)}")
+        lines.append(f"已确认仓库（来自检索命中）: {', '.join(real_repos)}")
     else:
         lines.append("(未确认到具体代码仓库)")
+
+    if available_repos:
+        other = sorted(set(available_repos) - SYNTHETIC_REPOS - set(real_repos))
+        if other:
+            lines.append(f"其他可用仓库（可参考试探）: {', '.join(other)}")
 
     shown = 0
     for item in merged:
@@ -418,7 +424,7 @@ def run_retrieval_loop(
 
             # ── Phase 2: LLM context-driven planning (after Round 1 discovery) ──
             if backends.llm_plan:
-                context = _build_context_for_llm(all_merged, confirmed_repos)
+                context = _build_context_for_llm(all_merged, confirmed_repos, available_repos=backends.available_repos)
                 plan.entities["round1_context"] = context
                 try:
                     llm_result = backends.llm_plan(question, plan)
