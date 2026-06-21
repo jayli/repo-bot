@@ -30,9 +30,11 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 
 from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
+from retrieval.answer_loop import run_answer_tool_loop
 from retrieval.planner import validate_llm_plan
 from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
+from retrieval.tool_dispatch import TOOLS, dispatch_tool
 from prompts.synthesizer import build_system_prompt, build_user_message
 from sourcebot_client import search_sourcebot as sourcebot_search
 
@@ -300,197 +302,6 @@ def search_graph_relations(query: str, results: list[dict], limit: int = 12) -> 
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 
-TOOLS: list[dict] = [
-    {
-        "name": "search_sourcebot",
-        "description": "精确关键词/正则代码搜索，适合搜索函数名、类名、字符串、import/require 语句。无需指定仓库名。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "搜索词或正则表达式"}},
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_qdrant",
-        "description": "语义向量搜索，适合自然语言描述的功能定位、概念搜索。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "自然语言搜索描述"}},
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_ast_structure",
-        "description": "AST 结构索引搜索，适合按符号名查定义位置、调用者和被调用者关系。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "符号名或结构查询"},
-                "repo": {"type": "string", "description": "可选，限定仓库名"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_graph_relations",
-        "description": "Neo4j 图遍历搜索，适合查调用链、影响范围和间接依赖关系。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "符号名或图查询"},
-                "repo": {"type": "string", "description": "可选，限定仓库名"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "read_manifest",
-        "description": "读取仓库依赖清单（package.json / pyproject.toml 等），适合确认包依赖和版本声明。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"repo": {"type": "string", "description": "仓库名"}},
-            "required": ["repo"],
-        },
-    },
-    {
-        "name": "local_tool_grep",
-        "description": "仓库内正则 grep，适合定位某个符号/字符串在目标仓库哪些文件中出现。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string", "description": "目标仓库名"},
-                "pattern": {"type": "string", "description": "正则表达式"},
-                "include": {"type": "array", "items": {"type": "string"}, "description": "文件白名单 glob"},
-                "exclude": {"type": "array", "items": {"type": "string"}, "description": "文件黑名单 glob"},
-                "context_lines": {"type": "integer", "description": "上下文行数"},
-            },
-            "required": ["repo", "pattern"],
-        },
-    },
-    {
-        "name": "local_tool_read",
-        "description": "读取仓库内某个文件的内容，可选行范围。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string", "description": "目标仓库名"},
-                "path": {"type": "string", "description": "仓库内相对文件路径"},
-                "start_line": {"type": "integer", "description": "起始行（1-based）"},
-                "end_line": {"type": "integer", "description": "结束行（1-based，包含）"},
-            },
-            "required": ["repo", "path"],
-        },
-    },
-    {
-        "name": "local_tool_list",
-        "description": "列出仓库内某个目录的文件/子目录列表。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string", "description": "目标仓库名"},
-                "dir_path": {"type": "string", "description": "仓库内相对目录，空字符串为根目录"},
-                "include": {"type": "array", "items": {"type": "string"}, "description": "文件白名单 glob"},
-                "exclude": {"type": "array", "items": {"type": "string"}, "description": "文件黑名单 glob"},
-            },
-            "required": ["repo"],
-        },
-    },
-]
-
-
-def _dispatch_tool(name: str, args: dict, evidence_pack: dict) -> str:
-    """Execute a tool call and return a compact text result."""
-    repo_roots_map = evidence_pack.get("repo_roots", {})
-    evidence_items = evidence_pack.get("evidence", [])
-
-    def _resolve_repo(repo: str) -> str | None:
-        """Map a repo name (possibly full github URL) to the short name that exists on disk."""
-        if repo in repo_roots_map and os.path.isdir(repo_roots_map[repo]):
-            return repo
-        # Try last path component: github.com/XTLS/Xray-core → Xray-core
-        short = repo.rsplit("/", 1)[-1]
-        if short in repo_roots_map and os.path.isdir(repo_roots_map[short]):
-            return short
-        # Try direct filesystem check
-        if os.path.isdir(os.path.join(REPOS_ROOT, short)):
-            return short
-        # Fuzzy scan
-        for key in repo_roots_map:
-            if (repo.endswith("/" + key) or key.endswith("/" + repo)) and os.path.isdir(repo_roots_map[key]):
-                return key
-        return None
-
-    def _evidence_as_results() -> list[dict]:
-        return [{"repo": e.get("repo", ""), "path": e.get("path", ""), "content": e.get("content", "")} for e in evidence_items]
-
-    if name == "search_sourcebot":
-        results = search_sourcebot(args["query"], top_k=5)
-        return json.dumps(results, ensure_ascii=False)[:3000]
-
-    elif name == "search_qdrant":
-        results = search_qdrant(args["query"], top_k=5)
-        return json.dumps(results, ensure_ascii=False)[:3000]
-
-    elif name == "search_ast_structure":
-        repo = args.get("repo")
-        ctx = _evidence_as_results()
-        if repo:
-            ctx = [r for r in ctx if r["repo"] == repo] or ctx
-        facts = search_ast_structure(args["query"], ctx, limit=8)
-        return "\n".join(facts) if facts else "(无命中)"
-
-    elif name == "search_graph_relations":
-        repo = args.get("repo")
-        ctx = _evidence_as_results()
-        if repo:
-            ctx = [r for r in ctx if r["repo"] == repo] or ctx
-        facts = search_graph_relations(args["query"], ctx, limit=8)
-        return "\n".join(facts) if facts else "(无命中)"
-
-    elif name == "read_manifest":
-        repo = args["repo"]
-        resolved = _resolve_repo(repo)
-        hits = read_manifest(REPOS_ROOT, resolved) if resolved else []
-        return json.dumps([{"path": h.path, "content": h.content[:500]} for h in hits], ensure_ascii=False) if hits else "(未找到 manifest)"
-
-    elif name == "local_tool_grep":
-        repo = args["repo"]
-        resolved = _resolve_repo(repo)
-        if not resolved:
-            return f"(仓库 '{repo}' 不在索引中)"
-        kwargs = {"pattern": args["pattern"], "max_matches": 20}
-        if args.get("include"):
-            kwargs["include"] = args["include"]
-        if args.get("exclude"):
-            kwargs["exclude"] = args["exclude"]
-        if args.get("context_lines") is not None:
-            kwargs["context_lines"] = args["context_lines"]
-        hits = local_tool_grep(REPOS_ROOT, resolved, **kwargs)
-        return json.dumps([{"path": h.path, "line_range": h.line_range, "content": h.content[:200]} for h in hits[:10]], ensure_ascii=False) if hits else "(无匹配)"
-
-    elif name == "local_tool_read":
-        repo = args["repo"]
-        resolved = _resolve_repo(repo)
-        if not resolved:
-            return f"(仓库 '{repo}' 不在索引中)"
-        hit = local_tool_read(REPOS_ROOT, resolved, path=args["path"], start_line=args.get("start_line"), end_line=args.get("end_line"), max_lines=200)
-        return hit.content[:3000] if hit and hit.content else "(文件不存在或为空)"
-
-    elif name == "local_tool_list":
-        repo = args["repo"]
-        resolved = _resolve_repo(repo)
-        if not resolved:
-            return f"(仓库 '{repo}' 不在索引中)"
-        kwargs = {"dir_path": args.get("dir_path", ""), "max_entries": 100}
-        if args.get("include"):
-            kwargs["include"] = args["include"]
-        if args.get("exclude"):
-            kwargs["exclude"] = args["exclude"]
-        entries = local_tool_list(REPOS_ROOT, resolved, **kwargs)
-        return json.dumps([{"path": e.path, "type": e.metadata.get("type", "?"), "size": e.metadata.get("size", 0)} for e in entries[:30]], ensure_ascii=False) if entries else "(目录为空)"
-
-    return f"未知工具: {name}"
-
 
 def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -509,89 +320,43 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
     client_kwargs["http_client"] = httpx.Client(verify=False)
     client = anthropic.Anthropic(**client_kwargs)
 
-    max_rounds = 12
-    last_text = ""
-
-    for round_n in range(max_rounds):
-        resp = client.messages.create(
-            model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-            max_tokens=3000,
-            system=system,
-            messages=messages,
-            tools=TOOLS,
+    def _dispatch(name: str, args: dict) -> str:
+        return dispatch_tool(
+            name,
+            args,
+            evidence_pack=evidence_pack,
+            repos_root=REPOS_ROOT,
+            search_sourcebot=search_sourcebot,
+            search_qdrant=search_qdrant,
+            search_ast_structure=search_ast_structure,
+            search_graph_relations=search_graph_relations,
+            read_manifest=read_manifest,
+            local_tool_grep=local_tool_grep,
+            local_tool_read=local_tool_read,
+            local_tool_list=local_tool_list,
         )
 
-        # Collect text and tool_use blocks
-        text_parts: list[str] = []
-        tool_uses: list[dict] = []
+    def _log_tool(name: str, args: dict, result_text: str) -> None:
+        print(f"  🔧 {name}({json.dumps(args, ensure_ascii=False)[:120]})")
+        preview = result_text[:150].replace("\n", " ").strip()
+        if len(result_text) > 150:
+            preview += f" ... ({len(result_text)} chars total)"
+        print(f"      → {preview}")
 
-        for block in resp.content:
-            if hasattr(block, "text") and block.text:
-                text_parts.append(block.text)
-            if getattr(block, "type", "") == "tool_use":
-                tool_uses.append({"id": block.id, "name": block.name, "input": dict(block.input)})
-
-        last_text = "\n".join(text_parts) if text_parts else ""
-
-        # If LLM returned a final text answer (no tool calls), return it
-        if not tool_uses:
-            return last_text if last_text else "(模型未生成文本回答)"
-
-        # Guard against runaway tool calls
-        if len(tool_uses) > 15:
-            break
-
-        # Execute tool calls
-        assistant_content: list[dict] = []
-
-        # Execute tool calls
-        assistant_content: list[dict] = []
-        if text_parts:
-            assistant_content.append({"type": "text", "text": "\n".join(text_parts)})
-
-        tool_results: list[dict] = []
-        for tu in tool_uses:
-            name = tu["name"]
-            args = tu["input"]
-            print(f"  🔧 {name}({json.dumps(args, ensure_ascii=False)[:120]})")
-            try:
-                result_text = _dispatch_tool(name, args, evidence_pack)
-            except Exception as e:
-                result_text = f"错误: {e}"
-            preview = result_text[:150].replace("\n", " ").strip()
-            if len(result_text) > 150:
-                preview += f" ... ({len(result_text)} chars total)"
-            print(f"      → {preview}")
-            tool_results.append({"tool_use_id": tu["id"], "content": result_text})
-
-        # Build assistant message with tool_use blocks
-        for tu in tool_uses:
-            assistant_content.append({"type": "tool_use", "id": tu["id"], "name": tu["name"], "input": tu["input"]})
-        messages.append({"role": "assistant", "content": assistant_content})
-
-        # Build user message with tool results
-        user_content: list[dict] = []
-        for tr in tool_results:
-            user_content.append({"type": "tool_result", "tool_use_id": tr["tool_use_id"], "content": tr["content"]})
-        messages.append({"role": "user", "content": user_content})
-
-    # Reached max rounds — do a final synthesis call without tools
-    if last_text:
+    def _log_max_rounds() -> None:
         print("  ⚠️ 达到最大轮次，基于已有上下文生成最终回答...")
-    messages.append({"role": "user", "content": "请基于以上的所有工具调用结果，给出最终回答。不要再调用工具。"})
-    try:
-        resp = client.messages.create(
-            model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-            max_tokens=3000,
-            system=system,
-            messages=messages,
-        )
-        for block in resp.content:
-            if hasattr(block, "text") and block.text:
-                return block.text
-    except Exception:
-        pass
-    return last_text if last_text else "(达到最大对话轮次)"
+
+    return run_answer_tool_loop(
+        client=client,
+        model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+        max_tokens=3000,
+        system=system,
+        messages=messages,
+        tools=TOOLS,
+        dispatch_tool=_dispatch,
+        on_tool_call=_log_tool,
+        on_max_rounds=_log_max_rounds,
+    )
 
 # ── LLM Planner Adapter ─────────────────────────────────────────────────────
 

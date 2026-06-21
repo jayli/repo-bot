@@ -8,9 +8,11 @@ import streamlit as st
 from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
 from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
-from retrieval.planner import validate_llm_plan, merge_llm_plan
+from retrieval.answer_loop import run_answer_tool_loop
+from retrieval.planner import validate_llm_plan
 from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
+from retrieval.tool_dispatch import TOOLS, dispatch_tool
 from prompts.synthesizer import build_system_prompt, build_user_message
 load_dotenv()
 
@@ -380,7 +382,12 @@ def ask_llm(question: str, ctx_json: str, history: list[dict] | None = None) -> 
             return block.text
     return "(模型未生成文本回答，可能只返回了 thinking block)"
 
-def ask_llm_with_evidence(question: str, evidence_pack: dict, history: list[dict] | None = None) -> str:
+def ask_llm_with_evidence(
+    question: str,
+    evidence_pack: dict,
+    history: list[dict] | None = None,
+    on_tool_call=None,
+) -> str:
     import anthropic, httpx
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
@@ -399,16 +406,35 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict, history: list[dict
         client_kwargs["base_url"] = base_url
     client_kwargs["http_client"] = httpx.Client(verify=False)
     client = anthropic.Anthropic(**client_kwargs)
-    resp = client.messages.create(
+
+    repos_root = os.environ.get("REPOS_ROOT", "/repos")
+
+    def _dispatch(name, args):
+        return dispatch_tool(
+            name,
+            args,
+            evidence_pack=evidence_pack,
+            repos_root=repos_root,
+            search_sourcebot=search_sourcebot,
+            search_qdrant=search_qdrant,
+            search_ast_structure=search_ast_structure,
+            search_graph_relations=search_graph_relations,
+            read_manifest=read_manifest,
+            local_tool_grep=local_tool_grep,
+            local_tool_read=local_tool_read,
+            local_tool_list=local_tool_list,
+        )
+
+    return run_answer_tool_loop(
+        client=client,
         model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-        max_tokens=3000,
         system=build_system_prompt(evidence_pack.get("answer_template", "generic_code_answer")),
         messages=messages,
+        tools=TOOLS,
+        dispatch_tool=_dispatch,
+        max_tokens=3000,
+        on_tool_call=on_tool_call,
     )
-    for block in resp.content:
-        if hasattr(block, "text") and block.text:
-            return block.text
-    return "(模型未生成文本回答，可能只返回了 thinking block)"
 
 # === 主界面 ===
 if "messages" not in st.session_state:
@@ -547,8 +573,16 @@ if prompt := st.chat_input("输入你的问题..."):
         with st.spinner("LLM 思考中..."):
             evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos, available_repos=get_indexed_repos())
             history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
+            tool_trace: list[dict] = []
+
+            def _record_tool_call(name, args, result_text):
+                preview = result_text[:300].replace("\n", " ").strip()
+                if len(result_text) > 300:
+                    preview += f" ... ({len(result_text)} chars total)"
+                tool_trace.append({"name": name, "args": args, "preview": preview})
+
             try:
-                answer = ask_llm_with_evidence(prompt, evidence_pack, history)
+                answer = ask_llm_with_evidence(prompt, evidence_pack, history, on_tool_call=_record_tool_call)
             except Exception:
                 # Fallback to old flat answer path
                 ctx_items = [{
@@ -580,6 +614,12 @@ if prompt := st.chat_input("输入你的问题..."):
                 "candidate_repos": evidence_pack.get("candidate_repos", [])[:5],
                 "evidence_count": len(evidence_pack.get("evidence", [])),
             })
+
+        if tool_trace:
+            with st.expander(f"🔧 LLM 工具调用 {len(tool_trace)} 次", expanded=False):
+                for item in tool_trace:
+                    st.caption(f"{item['name']}({json.dumps(item['args'], ensure_ascii=False)[:160]})")
+                    st.code(item["preview"], language="text")
 
         st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
