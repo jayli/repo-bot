@@ -3,12 +3,13 @@ repo-bot Chat UI — 混合检索对话框
 Qdrant 语义搜索 (text-embedding-v4) + Sourcebot Zoekt 搜索
 """
 import os, json
+import importlib
 from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
 from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
-from retrieval.answer_loop import run_answer_tool_loop
+import retrieval.answer_loop as answer_loop
 from retrieval.planner import validate_llm_plan
 from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
@@ -410,6 +411,7 @@ def ask_llm_with_evidence(
     on_tool_start=None,
     on_tool_call=None,
     on_tool_error=None,
+    on_final_delta=None,
 ) -> str:
     import anthropic, httpx
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -448,7 +450,8 @@ def ask_llm_with_evidence(
             local_tool_list=local_tool_list,
         )
 
-    return run_answer_tool_loop(
+    current_answer_loop = importlib.reload(answer_loop)
+    return current_answer_loop.run_answer_tool_loop(
         client=client,
         model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
         system=build_system_prompt(evidence_pack.get("answer_template", "generic_code_answer")),
@@ -459,6 +462,7 @@ def ask_llm_with_evidence(
         on_tool_start=on_tool_start,
         on_tool_call=on_tool_call,
         on_tool_error=on_tool_error,
+        on_final_delta=on_final_delta,
     )
 
 # === 主界面 ===
@@ -678,10 +682,21 @@ if prompt := st.chat_input("输入你的问题..."):
                 else:
                     st.caption("未找到相关调用链")
 
+        evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos, available_repos=get_indexed_repos())
+
+        with st.expander(f"📊 Evidence Pack ({evidence_pack.get('confidence', '-')})", expanded=False):
+            st.json({
+                "intent": evidence_pack.get("intent"),
+                "candidate_repos": evidence_pack.get("candidate_repos", [])[:5],
+                "evidence_count": len(evidence_pack.get("evidence", [])),
+            })
+
+        answer_placeholder = st.empty()
+        tool_trace: list[dict] = []
+
         with st.spinner("LLM 思考中..."):
-            evidence_pack = build_evidence_pack(prompt, plan, hits, ranked_repos, available_repos=get_indexed_repos())
             history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
-            tool_trace: list[dict] = []
+            streamed_answer_parts: list[str] = []
 
             def _record_tool_call(name, args, result_text):
                 preview = result_text[:300].replace("\n", " ").strip()
@@ -700,6 +715,10 @@ if prompt := st.chat_input("输入你的问题..."):
                 record_id = active_progress.pop(_progress_key(f"LLM tool {name}", detail), None)
                 _fail_progress(record_id, f"LLM tool {name}", error)
 
+            def _record_final_delta(delta):
+                streamed_answer_parts.append(delta)
+                answer_placeholder.markdown("".join(streamed_answer_parts))
+
             try:
                 synthesis_id = _start_progress("LLM synthesis", "基于 Evidence Pack 生成回答")
                 answer = ask_llm_with_evidence(
@@ -709,40 +728,31 @@ if prompt := st.chat_input("输入你的问题..."):
                     on_tool_start=_record_tool_start,
                     on_tool_call=_record_tool_call,
                     on_tool_error=_record_tool_error,
+                    on_final_delta=_record_final_delta,
                 )
+                if not streamed_answer_parts:
+                    answer_placeholder.markdown(answer)
                 _complete_progress(synthesis_id)
-            except Exception:
-                _fail_progress(locals().get("synthesis_id"), "LLM synthesis", "工具循环失败，降级到纯 Evidence Pack 回答")
-                # Fallback to old flat answer path
-                ctx_items = [{
-                    "repo": r["repo"], "path": r["path"], "line": r["line"],
-                    "language": r.get("language", ""), "content": r.get("content", ""),
-                } for r in merged]
-                if ast_facts:
-                    ctx_items.append({
-                        "repo": "ast-service",
-                        "path": "structure",
-                        "line": "",
-                        "language": "text",
-                        "content": "\n".join(ast_facts),
-                    })
-                if graph_facts:
-                    ctx_items.append({
-                        "repo": "ast-service",
-                        "path": "graph",
-                        "line": "",
-                        "language": "text",
-                        "content": "\n".join(graph_facts),
-                    })
-                ctx_json = json.dumps(ctx_items)
-                answer = ask_llm(prompt, ctx_json, history)
-
-        with st.expander(f"📊 Evidence Pack ({evidence_pack.get('confidence', '-')})", expanded=False):
-            st.json({
-                "intent": evidence_pack.get("intent"),
-                "candidate_repos": evidence_pack.get("candidate_repos", [])[:5],
-                "evidence_count": len(evidence_pack.get("evidence", [])),
-            })
+            except Exception as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+                _fail_progress(locals().get("synthesis_id"), "LLM synthesis", f"流式回答失败，非流式重试：{error_text}")
+                try:
+                    retry_id = _start_progress("LLM synthesis", "使用 Evidence Pack 非流式重试")
+                    answer = ask_llm_with_evidence(
+                        prompt,
+                        evidence_pack,
+                        history,
+                        on_tool_start=_record_tool_start,
+                        on_tool_call=_record_tool_call,
+                        on_tool_error=_record_tool_error,
+                    )
+                    answer_placeholder.markdown(answer)
+                    _complete_progress(retry_id)
+                except Exception as retry_exc:
+                    retry_error = f"{type(retry_exc).__name__}: {retry_exc}"
+                    _fail_progress(locals().get("retry_id"), "LLM synthesis", retry_error)
+                    answer = f"LLM 回答生成失败：{retry_error}"
+                    answer_placeholder.error(answer)
 
         if tool_trace:
             with st.expander(f"🔧 LLM 工具调用 {len(tool_trace)} 次", expanded=False):
@@ -750,6 +760,5 @@ if prompt := st.chat_input("输入你的问题..."):
                     st.caption(f"{item['name']}({json.dumps(item['args'], ensure_ascii=False)[:160]})")
                     st.code(item["preview"], language="text")
 
-        st.markdown(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
         _persist_messages()

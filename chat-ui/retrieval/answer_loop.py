@@ -33,6 +33,7 @@ def run_answer_tool_loop(
     on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
     on_tool_call: Callable[[str, dict[str, Any], str], None] | None = None,
     on_tool_error: Callable[[str, dict[str, Any], str], None] | None = None,
+    on_final_delta: Callable[[str], None] | None = None,
     on_max_rounds: Callable[[], None] | None = None,
 ) -> str:
     """Run an Anthropic-style answer loop with model tool calls.
@@ -55,6 +56,16 @@ def run_answer_tool_loop(
         last_text = "\n".join(text_parts) if text_parts else ""
 
         if not tool_uses:
+            if on_final_delta:
+                streamed = _stream_final_answer(
+                    client=client,
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=conversation,
+                    on_final_delta=on_final_delta,
+                )
+                return streamed if streamed else (last_text if last_text else "(模型未生成文本回答)")
             return last_text if last_text else "(模型未生成文本回答)"
         if len(tool_uses) > max_tool_uses_per_round:
             break
@@ -106,8 +117,18 @@ def run_answer_tool_loop(
 
     if on_max_rounds:
         on_max_rounds()
-    conversation.append({"role": "user", "content": final_instruction})
+    _append_user_instruction(conversation, final_instruction)
     try:
+        if on_final_delta:
+            streamed = _stream_final_answer(
+                client=client,
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=conversation,
+                on_final_delta=on_final_delta,
+            )
+            return streamed if streamed else (last_text if last_text else "(达到最大对话轮次)")
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -120,3 +141,45 @@ def run_answer_tool_loop(
     except Exception:
         pass
     return last_text if last_text else "(达到最大对话轮次)"
+
+
+def _stream_final_answer(
+    *,
+    client: Any,
+    model: str,
+    max_tokens: int,
+    system: str,
+    messages: list[dict[str, Any]],
+    on_final_delta: Callable[[str], None],
+) -> str:
+    text_parts: list[str] = []
+    try:
+        with client.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        ) as stream:
+            for delta in stream.text_stream:
+                text_parts.append(delta)
+                try:
+                    on_final_delta(delta)
+                except Exception:
+                    return "".join(text_parts)
+    except Exception:
+        return ""
+    return "".join(text_parts)
+
+
+def _append_user_instruction(conversation: list[dict[str, Any]], instruction: str) -> None:
+    if not conversation or conversation[-1].get("role") != "user":
+        conversation.append({"role": "user", "content": instruction})
+        return
+
+    content = conversation[-1].get("content")
+    if isinstance(content, str):
+        conversation[-1]["content"] = f"{content}\n\n{instruction}"
+    elif isinstance(content, list):
+        content.append({"type": "text", "text": instruction})
+    else:
+        conversation[-1]["content"] = instruction
