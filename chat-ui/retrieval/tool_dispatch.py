@@ -128,6 +128,15 @@ def _evidence_as_results(evidence_pack: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _missing_required_args(tool_name: str, args: dict[str, Any]) -> str | None:
+    schema = next((tool for tool in TOOLS if tool.get("name") == tool_name), None)
+    required = schema.get("input_schema", {}).get("required", []) if schema else []
+    missing = [key for key in required if args.get(key) in (None, "")]
+    if not missing:
+        return None
+    return f"(参数缺失: {tool_name} 需要 {', '.join(missing)})"
+
+
 def dispatch_tool(
     name: str,
     args: dict[str, Any],
@@ -153,6 +162,10 @@ def dispatch_tool(
         local_tool_grep = local_tool_grep or default_local_tool_grep
         local_tool_read = local_tool_read or default_local_tool_read
         local_tool_list = local_tool_list or default_local_tool_list
+
+    missing_args = _missing_required_args(name, args)
+    if missing_args:
+        return missing_args
 
     if name == "search_sourcebot":
         if not search_sourcebot:

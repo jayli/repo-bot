@@ -44,3 +44,32 @@ def test_dispatch_tool_resolves_repo_and_reads_local_file(tmp_path):
 
     assert result == "file body"
     assert calls == [(str(repo_root), "demo", {"path": "README.md", "start_line": None, "end_line": None, "max_lines": 200})]
+
+
+def test_dispatch_tool_reports_missing_required_args_without_raising(tmp_path):
+    tool_dispatch = load_module("retrieval.tool_dispatch")
+
+    result = tool_dispatch.dispatch_tool(
+        "local_tool_grep",
+        {},
+        evidence_pack={"repo_roots": {}, "evidence": []},
+        repos_root=str(tmp_path),
+    )
+
+    assert result == "(参数缺失: local_tool_grep 需要 repo, pattern)"
+
+
+def test_dispatch_tool_reports_missing_query_without_calling_backend(tmp_path):
+    tool_dispatch = load_module("retrieval.tool_dispatch")
+    called = []
+
+    result = tool_dispatch.dispatch_tool(
+        "search_sourcebot",
+        {},
+        evidence_pack={"repo_roots": {}, "evidence": []},
+        repos_root=str(tmp_path),
+        search_sourcebot=lambda query, top_k: called.append((query, top_k)),
+    )
+
+    assert result == "(参数缺失: search_sourcebot 需要 query)"
+    assert called == []

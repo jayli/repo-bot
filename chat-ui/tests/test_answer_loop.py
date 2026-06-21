@@ -52,6 +52,31 @@ class FakeClient:
         self.messages = FakeMessages()
 
 
+class DSMLMessages:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return Response([
+                TextBlock(
+                    '<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="local_tool_read"> '
+                    '<｜｜DSML｜｜parameter name="repo" string="true">passwall-any</｜｜DSML｜｜parameter> '
+                    '<｜｜DSML｜｜parameter name="path" string="true">README.md</｜｜DSML｜｜parameter> '
+                    '<｜｜DSML｜｜parameter name="start_line" string="false">700</｜｜DSML｜｜parameter> '
+                    '<｜｜DSML｜｜parameter name="end_line" string="false">850</｜｜DSML｜｜parameter> '
+                    '</｜｜DSML｜｜invoke> </｜｜DSML｜｜tool_calls>'
+                )
+            ])
+        return Response([TextBlock("README 里给了多个节点链接。")])
+
+
+class DSMLClient:
+    def __init__(self):
+        self.messages = DSMLMessages()
+
+
 class FakeStream:
     def __init__(self, parts):
         self.text_stream = parts
@@ -175,6 +200,38 @@ def test_run_answer_tool_loop_reports_tool_error_without_success_callback():
     )
 
     assert events == [("error", "local_tool_read", "错误: boom")]
+
+
+def test_run_answer_tool_loop_executes_dsml_text_tool_call():
+    answer_loop = load_module("retrieval.answer_loop")
+    client = DSMLClient()
+    dispatched = []
+
+    def dispatch_tool(name, args):
+        dispatched.append((name, args))
+        return "README 节点链接内容"
+
+    answer = answer_loop.run_answer_tool_loop(
+        client=client,
+        model="test-model",
+        system="system prompt",
+        messages=[{"role": "user", "content": "question"}],
+        tools=[{"name": "local_tool_read"}],
+        dispatch_tool=dispatch_tool,
+        max_tokens=100,
+        max_rounds=3,
+    )
+
+    assert answer == "README 里给了多个节点链接。"
+    assert dispatched == [
+        (
+            "local_tool_read",
+            {"repo": "passwall-any", "path": "README.md", "start_line": 700, "end_line": 850},
+        )
+    ]
+    assert client.messages.calls[1]["messages"][-1]["content"] == [
+        {"type": "tool_result", "tool_use_id": "dsml-tool-1", "content": "README 节点链接内容"}
+    ]
 
 
 def test_run_answer_tool_loop_streams_final_answer_only_after_tools_finish():

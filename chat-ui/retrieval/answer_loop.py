@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 from typing import Any
 
 
@@ -15,7 +16,49 @@ def _text_and_tool_uses(content: list[Any]) -> tuple[list[str], list[dict[str, A
             text_parts.append(block.text)
         if getattr(block, "type", "") == "tool_use":
             tool_uses.append({"id": block.id, "name": block.name, "input": dict(block.input)})
+    if not tool_uses and text_parts:
+        tool_uses = _parse_dsml_tool_calls("\n".join(text_parts))
+        if tool_uses:
+            text_parts = []
     return text_parts, tool_uses
+
+
+def _parse_dsml_tool_calls(text: str) -> list[dict[str, Any]]:
+    if "DSML" not in text or "tool_calls" not in text:
+        return []
+
+    calls: list[dict[str, Any]] = []
+    invoke_pattern = re.compile(r'<｜｜DSML｜｜invoke\s+name="([^"]+)">(.*?)</｜｜DSML｜｜invoke>', re.DOTALL)
+    param_pattern = re.compile(
+        r'<｜｜DSML｜｜parameter\s+name="([^"]+)"\s+string="([^"]+)">(.*?)</｜｜DSML｜｜parameter>',
+        re.DOTALL,
+    )
+    for index, invoke_match in enumerate(invoke_pattern.finditer(text), start=1):
+        name = invoke_match.group(1)
+        body = invoke_match.group(2)
+        args: dict[str, Any] = {}
+        for param_match in param_pattern.finditer(body):
+            param_name = param_match.group(1)
+            is_string = param_match.group(2).lower() == "true"
+            raw_value = param_match.group(3).strip()
+            args[param_name] = raw_value if is_string else _coerce_dsml_value(raw_value)
+        calls.append({"id": f"dsml-tool-{index}", "name": name, "input": args})
+    return calls
+
+
+def _coerce_dsml_value(value: str) -> Any:
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
 
 
 def run_answer_tool_loop(
