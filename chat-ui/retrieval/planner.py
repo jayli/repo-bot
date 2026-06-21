@@ -99,4 +99,8 @@ def merge_llm_plan(base: RetrievalPlan, llm_plan: dict[str, Any]) -> RetrievalPl
     extra_precision = llm_plan.get("precision_search", {})
     if isinstance(extra_precision, dict) and isinstance(extra_precision.get("extra_patterns"), list):
         precision["patterns"] = _extend_unique(list(precision.get("patterns", [])), extra_precision["extra_patterns"])
-    return replace(base, queries=queries, precision=precision)
+    entities = dict(base.entities)
+    entity_hints = llm_plan.get("entity_hints")
+    if isinstance(entity_hints, dict):
+        entities["entity_hints"] = entity_hints
+    return replace(base, queries=queries, precision=precision, entities=entities)

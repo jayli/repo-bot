@@ -3,13 +3,19 @@ from pathlib import Path
 import sys
 
 
-def load_planner():
+def load_module(name):
     root = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location("retrieval.planner", root / "retrieval/planner.py")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    spec = importlib.util.spec_from_file_location(name, root / (name.replace(".", "/") + ".py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_planner():
+    return load_module("retrieval.planner")
 
 
 def test_dependency_query_extracts_subject_and_object():
@@ -47,3 +53,13 @@ def test_merge_llm_plan_adds_queries_without_replacing_intent():
 
     assert merged.intent == "dependency_relation"
     assert "ProxyServer" in merged.queries["sourcebot"]
+
+
+def test_merge_llm_plan_preserves_entity_hints():
+    planner = load_planner()
+    base = planner.plan_query("koa 是怎样依赖 koa-router 的")
+
+    merged = planner.merge_llm_plan(base, {"entity_hints": {"likely_repo": "koa", "likely_dependency": "koa-router"}})
+
+    assert merged.entities["entity_hints"]["likely_repo"] == "koa"
+    assert merged.entities["entity_hints"]["likely_dependency"] == "koa-router"
