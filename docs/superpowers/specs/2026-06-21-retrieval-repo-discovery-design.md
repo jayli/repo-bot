@@ -60,9 +60,10 @@ Merging is additive and order-preserving. Deterministic values stay first; LLM v
 
 Probe promotion currently uses a low threshold: any probe hit promotes the candidate repo. This is acceptable for the initial PassWall regression because candidates are bounded by `available_repos`, explicit repo hints, and a maximum of three probes per loop.
 
-The main risk is false promotion from generic terms such as `config` or `global`. The current mitigation is that probe patterns are built from ordered facets and capped to a small list; specific terms such as `passwall`, `luci-app-passwall`, `0_default_config`, and `subscribe.lua` appear before generic config terms. Future hardening should add at least one of:
+The main risk is false promotion from generic terms such as `config` or `global`. The current mitigation is that probe patterns are built from ordered facets and capped to a small list; specific terms such as `passwall`, `luci-app-passwall`, `0_default_config`, and `subscribe.lua` appear before generic config terms. Promotion also requires at least one non-generic probe term to appear in the probe hit path or content, so a generic-only match such as `config global node` cannot confirm a repository by itself.
 
-- A minimum score requiring a specific facet hit, not only a generic term.
+Future hardening can still add:
+
 - A threshold of two independent facet hits before promotion.
 - Per-facet weights so `config` cannot promote a repo by itself.
 - File-path weighting for known configuration files.
@@ -121,7 +122,8 @@ Add tests for:
 - Empty probes do not promote candidates.
 - `available_repos=None` skips candidate derivation.
 - New candidates added by the LLM in Round 1 can be probed once.
-- Generic-only probe hits should not be allowed to dominate future ranking without additional evidence.
+- Generic-only probe hits do not promote candidates.
+- Probe pattern construction preserves order, caps terms, and escapes regex metacharacters.
 
 ## Non-goals
 

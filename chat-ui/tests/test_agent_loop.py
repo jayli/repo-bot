@@ -508,3 +508,186 @@ def test_chinese_proxy_config_query_probes_and_confirms_passwall_candidate():
     assert "passwall-any" in fake.probed_repos
     actions = [action for r in result.rounds for action in r.local_actions]
     assert any(action.repo == "passwall-any" for action in actions)
+
+
+def test_probe_pattern_preserves_order_caps_terms_and_escapes_regex():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    plan = models.RetrievalPlan(
+        "generic_code_answer",
+        "generic_code_answer",
+        entities={
+            "search_facets": ["passwall", "a", "luci.app*", "0_default_config"],
+            "raw_terms": ["passwall", "subscribe.lua", "节点", "订阅", "代理", "透明代理", "config", "uci", "global", "node", "extra"],
+        },
+    )
+
+    pattern = agent_loop._probe_pattern(plan, "科学上网的配置是怎样的")
+
+    assert pattern.split("|") == [
+        "passwall",
+        "luci\\.app\\*",
+        "0_default_config",
+        "subscribe\\.lua",
+        "节点",
+        "订阅",
+        "代理",
+        "透明代理",
+        "config",
+        "uci",
+    ]
+
+
+def test_empty_probe_does_not_promote_candidate_repo():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    fake.local_tool_grep = lambda *args, **kwargs: []
+    plan = models.RetrievalPlan(
+        "generic_code_answer",
+        "generic_code_answer",
+        entities={"search_facets": ["passwall"], "raw_terms": ["passwall"]},
+    )
+    confirmed = set()
+    probed = set()
+
+    hits, actions = agent_loop._probe_candidate_repos(plan, "科学上网", "/tmp/repos", fake, ["passwall-any"], confirmed, probed)
+
+    assert hits == []
+    assert confirmed == set()
+    assert probed == {"passwall-any"}
+    assert actions == [agent_loop.LocalAction("repo_probe_grep", "passwall-any", {"pattern": "passwall|科学上网"})]
+
+
+def test_no_available_repos_skips_candidate_derivation_and_probe():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakePasswallDiscoveryBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+        fake.llm_plan,
+        available_repos=None,
+    )
+
+    result = agent_loop.run_retrieval_loop("科学上网的配置是怎样的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    assert result.candidate_repos == []
+    assert fake.probed_repos == []
+
+
+class FakeMultiCandidateProbeBackends(FakePasswallDiscoveryBackends):
+    def local_tool_grep(self, repos_root, repo, **kwargs):
+        self.grep_calls.append({"repo": repo, **kwargs})
+        models = load_module("retrieval.models")
+        if repo == "passwall-any":
+            self.probed_repos.append(repo)
+            return [models.RetrievalHit("local_tool", repo, "README.md", "L1", "passwall node config", "probe")]
+        if repo == "openwrt-packages":
+            self.probed_repos.append(repo)
+            return [models.RetrievalHit("local_tool", repo, "feeds/passwall/Makefile", "L1", "luci-app-passwall package", "probe")]
+        return []
+
+    def llm_plan(self, question, plan):
+        return {"repo_candidates": ["passwall-any", "openwrt-packages"]}
+
+
+def test_multiple_probe_hit_candidates_can_be_confirmed_and_ranked():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeMultiCandidateProbeBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+        fake.llm_plan,
+        available_repos=["Xray-core", "passwall-any", "openwrt-packages"],
+    )
+
+    result = agent_loop.run_retrieval_loop("科学上网的配置是怎样的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    assert {"passwall-any", "openwrt-packages"}.issubset(result.confirmed_repos)
+    assert [item["repo"] for item in result.ranked_repos if item["repo"] in {"passwall-any", "openwrt-packages"}] == [
+        "openwrt-packages",
+        "passwall-any",
+    ]
+
+
+class FakeRound2CandidateBackends(FakePasswallDiscoveryBackends):
+    def __init__(self):
+        super().__init__()
+        self.probe_counts = {}
+
+    def local_tool_grep(self, repos_root, repo, **kwargs):
+        self.grep_calls.append({"repo": repo, **kwargs})
+        if kwargs.get("max_matches") == 5:
+            self.probe_counts[repo] = self.probe_counts.get(repo, 0) + 1
+        if repo == "passwall-any":
+            models = load_module("retrieval.models")
+            return [models.RetrievalHit("local_tool", repo, "README.md", "L1", "passwall config", "probe")]
+        return []
+
+    def llm_plan(self, question, plan):
+        return {"repo_candidates": ["passwall-any"]}
+
+
+def test_llm_added_candidate_is_probed_once_across_rounds():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeRound2CandidateBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+        fake.llm_plan,
+        available_repos=["Xray-core", "passwall-any"],
+    )
+
+    result = agent_loop.run_retrieval_loop("自定义代理配置在哪里", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    assert "passwall-any" in result.confirmed_repos
+    assert fake.probe_counts == {"passwall-any": 1}
+
+
+def test_generic_only_probe_hit_does_not_promote_candidate_repo():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    fake.local_tool_grep = lambda *args, **kwargs: [
+        models.RetrievalHit("local_tool", "some-config-repo", "settings.ini", "L1", "config global node", "probe")
+    ]
+    plan = models.RetrievalPlan(
+        "generic_code_answer",
+        "generic_code_answer",
+        entities={"search_facets": ["config", "global", "node"], "raw_terms": ["config", "global", "node"]},
+    )
+    confirmed = set()
+
+    hits, _ = agent_loop._probe_candidate_repos(
+        plan,
+        "配置怎么写",
+        "/tmp/repos",
+        fake,
+        ["some-config-repo"],
+        confirmed,
+        set(),
+    )
+
+    assert hits == []
+    assert confirmed == set()

@@ -155,49 +155,49 @@ Expected: changes are scoped to retrieval discovery and docs.
 
 Assert an unrelated Chinese query that does not match `DOMAIN_FACETS` keeps existing fallback behavior and does not create `repo_candidates`.
 
-- [ ] **Step 2: Add empty-probe regression**
+- [x] **Step 2: Add empty-probe regression**
 
 Assert a candidate repo with no probe hits is not promoted to `confirmed_repos`.
 
-- [ ] **Step 3: Add no-available-repos regression**
+- [x] **Step 3: Add no-available-repos regression**
 
 Assert `available_repos=None` skips candidate derivation and probe execution.
 
-- [ ] **Step 4: Add multi-candidate regression**
+- [x] **Step 4: Add multi-candidate regression**
 
 Assert multiple probe-hit repos can be confirmed, and ranking still controls final repo ordering.
 
-- [ ] **Step 5: Add generic-term false-positive regression**
+- [x] **Step 5: Add generic-term false-positive regression**
 
-Add a test describing the desired future behavior: a generic-only match such as `config` should not promote a repo unless accompanied by a specific facet. This may require a production-code hardening step before it can pass.
+Add a test asserting a generic-only match such as `config` does not promote a repo unless accompanied by a specific facet.
 
-- [ ] **Step 6: Add Round 2 candidate regression**
+- [x] **Step 6: Add Round 2 candidate regression**
 
 Assert a new repo candidate returned by post-Round-1 LLM planning is probed once and not re-probed in later rounds because `probed_repos` is shared across the loop.
 
-- [ ] **Step 7: Add `_probe_pattern()` unit coverage**
+- [x] **Step 7: Add `_probe_pattern()` unit coverage**
 
 Assert `_probe_pattern()` preserves facet order, filters terms shorter than two characters, caps to 10 terms, and escapes regex metacharacters before joining with `|`.
 
-### Task 7: Probe Hardening Deferred Work
+### Task 7: Probe Hardening
 
 **Files:**
 - Modify: `chat-ui/retrieval/agent_loop.py`
 - Test: `chat-ui/tests/test_agent_loop.py`
 
-- [ ] **Step 1: Define facet specificity**
+- [x] **Step 1: Define facet specificity**
 
 Classify probe terms as specific or generic. For the current PassWall domain, specific terms include `passwall`, `openwrt-passwall`, `luci-app-passwall`, `0_default_config`, and `subscribe.lua`; generic terms include `config`, `global`, and `node`.
 
-- [ ] **Step 2: Add failing generic-only promotion test**
+- [x] **Step 2: Add failing generic-only promotion test**
 
 Assert a candidate repo hit containing only generic terms is not promoted to `confirmed_repos`.
 
-- [ ] **Step 3: Implement minimal hardening**
+- [x] **Step 3: Implement minimal hardening**
 
 Require at least one specific facet hit before promoting a candidate repo. Keep the existing bounded probe behavior and avoid adding a scoring subsystem until multiple domains need it.
 
-- [ ] **Step 4: Verify targeted and full tests**
+- [x] **Step 4: Verify targeted and full tests**
 
 ```bash
 python3 -m pytest chat-ui/tests/test_agent_loop.py -q

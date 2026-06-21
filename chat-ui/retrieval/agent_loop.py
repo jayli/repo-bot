@@ -77,6 +77,7 @@ def unique_keep_order(items: list[str]) -> list[str]:
 _REQUIRE_SINGLE = re.compile(r"""require\((["'])([^"']+)\1\)""")
 _IMPORT_FROM = re.compile(r"""(?:from|import)\s+(["'])([^"']+)\1""")
 _DEPENDENCY_KEY = re.compile(r'"(dependencies|devDependencies|peerDependencies)"')
+GENERIC_PROBE_TERMS = {"config", "global", "node", "uci", "配置"}
 
 
 def expand_queries(question: str, plan: RetrievalPlan, discovered_terms: list[str] | None = None) -> dict[str, list[str]]:
@@ -327,6 +328,25 @@ def _probe_pattern(plan: RetrievalPlan, question: str) -> str:
     return "|".join(re.escape(term) for term in compact) or re.escape(question)
 
 
+def _specific_probe_terms(plan: RetrievalPlan, question: str) -> list[str]:
+    terms: list[str] = []
+    for key in ("search_facets", "raw_terms"):
+        values = plan.entities.get(key, [])
+        if isinstance(values, list):
+            terms.extend([value for value in values if isinstance(value, str)])
+    terms.append(question)
+    return [
+        term
+        for term in unique_keep_order(terms)
+        if term and len(term) >= 2 and term.lower() not in GENERIC_PROBE_TERMS
+    ][:10]
+
+
+def _probe_hit_has_specific_term(hit: RetrievalHit, specific_terms: list[str]) -> bool:
+    haystack = f"{hit.path}\n{hit.content}".lower()
+    return any(term.lower() in haystack for term in specific_terms)
+
+
 def _probe_candidate_repos(
     plan: RetrievalPlan,
     question: str,
@@ -340,6 +360,7 @@ def _probe_candidate_repos(
     hits: list[RetrievalHit] = []
     actions: list[LocalAction] = []
     pattern = _probe_pattern(plan, question)
+    specific_terms = _specific_probe_terms(plan, question)
     for repo in candidate_repos:
         if repo in confirmed_repos or repo in probed_repos:
             continue
@@ -350,8 +371,9 @@ def _probe_candidate_repos(
             probe_hits = backends.local_tool_grep(repos_root, repo, pattern=pattern, max_matches=5)
         except Exception:
             probe_hits = []
-        if probe_hits:
-            hits.extend(probe_hits)
+        specific_hits = [hit for hit in probe_hits if _probe_hit_has_specific_term(hit, specific_terms)]
+        if specific_hits:
+            hits.extend(specific_hits)
             confirmed_repos.add(repo)
         if len(actions) >= limit:
             break
