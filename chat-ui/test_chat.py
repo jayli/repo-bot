@@ -29,8 +29,9 @@ import requests
 from openai import OpenAI
 from qdrant_client import QdrantClient
 
+from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
 from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
-from retrieval.ranking import rank_repositories, should_run_precision_search
+from retrieval.ranking import rank_repositories
 from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
 from retrieval.models import RetrievalHit
@@ -108,35 +109,6 @@ def read_file_content(repo: str, path: str, start_line: int, end_line: int) -> s
         return "".join(lines[max(0, start_line - 1):end_line])
     except Exception:
         return ""
-
-def to_hits(results: list[dict], source: str) -> list[RetrievalHit]:
-    hits = []
-    for r in results:
-        line = r.get("line") or f"L{r.get('start_line', 1)}"
-        hits.append(RetrievalHit(
-            source=source,
-            repo=r.get("repo", ""),
-            path=r.get("path", ""),
-            line_range=line,
-            content=r.get("content", ""),
-            strength="exact_text" if source == "sourcebot" else "semantic",
-            score=r.get("score"),
-        ))
-    return hits
-
-def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
-    k = 60
-    scores, all_r = {}, {}
-    for rank, r in enumerate(src):
-        key = f"{r['repo']}:{r['path']}:{r['line']}"
-        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
-        all_r[key] = r
-    for rank, r in enumerate(qdr):
-        key = f"{r['repo']}:{r['path']}:{r['line']}"
-        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
-        all_r[key] = r
-    ranked = sorted(scores.items(), key=lambda x: -x[1])[:top_k]
-    return [all_r[k] for k, _ in ranked]
 
 def candidate_symbols(query: str, results: list[dict], limit: int = 8) -> list[str]:
     names: list[str] = []
@@ -331,6 +303,33 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
             return block.text
     return "(模型未生成文本回答，可能只返回了 thinking block)"
 
+# ── LLM Planner Adapter ─────────────────────────────────────────────────────
+
+def llm_plan_query(question: str, plan) -> dict:
+    if not USE_LLM_PLANNER or plan.intent not in {"dependency_relation", "call_chain", "troubleshooting"}:
+        return {}
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {}
+    try:
+        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client_kwargs["http_client"] = httpx.Client(verify=False)
+        client = anthropic.Anthropic(**client_kwargs)
+        resp = client.messages.create(
+            model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+            max_tokens=500,
+            system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
+            messages=[{"role": "user", "content": f"问题：{question}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
+        )
+        llm_text = next((b.text for b in resp.content if hasattr(b, "text") and b.text), "")
+        llm_plan = validate_llm_plan(llm_text)
+        return llm_plan if llm_plan else {}
+    except Exception:
+        return {}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -341,99 +340,49 @@ def main():
     question = " ".join(sys.argv[1:])
     print(f"🔍 问题: {question}\n")
 
-    # 1. Plan
-    plan = plan_query(question)
-    print(f"📋 意图: {plan.intent}  |  Entities: {plan.entities.get('raw_terms', [])}")
+    # 1-7. Retrieval loop
+    backends = RetrievalBackends(
+        search_sourcebot=search_sourcebot,
+        search_qdrant=search_qdrant,
+        search_ast_structure=search_ast_structure,
+        search_graph_relations=search_graph_relations,
+        read_file_content=read_file_content,
+        read_manifest=read_manifest,
+        local_tool_list=local_tool_list,
+        local_tool_grep=local_tool_grep,
+        local_tool_read=local_tool_read,
+        llm_plan=llm_plan_query,
+    )
 
-    # 2. Optional LLM planner
-    if USE_LLM_PLANNER and plan.intent in {"dependency_relation", "call_chain", "troubleshooting"}:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-        if api_key:
-            try:
-                client_kwargs = {"api_key": api_key}
-                if base_url:
-                    client_kwargs["base_url"] = base_url
-                client_kwargs["http_client"] = httpx.Client(verify=False)
-                client = anthropic.Anthropic(**client_kwargs)
-                resp = client.messages.create(
-                    model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-                    max_tokens=500,
-                    system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
-                    messages=[{"role": "user", "content": f"问题：{question}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
-                )
-                llm_text = next((b.text for b in resp.content if hasattr(b, "text") and b.text), "")
-                llm_plan = validate_llm_plan(llm_text)
-                if llm_plan:
-                    plan = merge_llm_plan(plan, llm_plan)
-                    print(f"🤖 LLM Planner 已合并")
-            except Exception as e:
-                print(f"  ⚠️  LLM Planner 失败: {e}", file=sys.stderr)
+    print("⏳ 检索中...")
+    result = run_retrieval_loop(question, repos_root=REPOS_ROOT, backends=backends)
 
-    # 3. Search
-    print("\n⏳ 检索中...")
-    src = search_sourcebot(question)
-    qdr = search_qdrant(question)
-    merged = merge_results(src, qdr)
-    print(f"  Sourcebot: {len(src)} 条  |  Qdrant: {len(qdr)} 条  |  Merge: {len(merged)} 条")
+    plan = result.plan
+    hits = result.hits
+    merged = result.merged
+    ast_facts = result.ast_facts
+    graph_facts = result.graph_facts
+    ranked_repos = result.ranked_repos
 
-    # 4. Read content for merged results
-    for r in merged:
-        if not r.get("content"):
-            r["content"] = read_file_content(
-                r["repo"], r["path"],
-                r.get("start_line", 1), r.get("end_line", r.get("start_line", 1) + 30))
+    print(f"📋 意图: {plan.intent}")
 
-    # 5. AST & Graph
-    ast_facts = search_ast_structure(question, merged)
-    graph_facts = search_graph_relations(question, merged)
+    # Round diagnostics
+    for round_info in result.rounds:
+        print(f"  Round {round_info.index}: Sourcebot={len(round_info.sourcebot_queries)} Qdrant={len(round_info.qdrant_queries)} AST={len(round_info.ast_queries)} Graph={len(round_info.graph_queries)} Local={len(round_info.local_actions)} NewHits={round_info.new_hits}")
+        if round_info.notes:
+            for note in round_info.notes:
+                print(f"    ⚠️  {note}")
+
+    print(f"  Total: Sourcebot={len([h for h in hits if h.source == 'sourcebot'])} Qdrant={len([h for h in hits if h.source == 'qdrant'])} Merge={len(merged)}")
     print(f"  AST: {len(ast_facts)} 条  |  Neo4j: {len(graph_facts)} 条")
-
-    # 6. Build hits
-    hits = to_hits(src, "sourcebot") + to_hits(qdr, "qdrant")
-    for fact in ast_facts:
-        hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
-    for fact in graph_facts:
-        hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
-    ranked_repos = rank_repositories(hits)
 
     if ranked_repos:
         top_repos_str = ", ".join(f"{r['repo']}({r['score']})" for r in ranked_repos[:3])
         print(f"  Top repos: {top_repos_str}")
 
-    # 7. Precision search
-    if should_run_precision_search(plan, ranked_repos):
-        top_repo = ranked_repos[0]["repo"]
-        try:
-            if plan.precision.get("read_manifests"):
-                hits.extend(read_manifest(REPOS_ROOT, top_repo))
-                hits.extend(local_tool_list(
-                    REPOS_ROOT, top_repo, dir_path="",
-                    exclude=["node_modules/*", ".git/*", "__pycache__/*", "dist/*", "build/*", ".next/*", "vendor/*"],
-                    max_entries=100,
-                ))
-            for pattern in plan.precision.get("patterns", [])[:5]:
-                hits.extend(local_tool_grep(
-                    REPOS_ROOT, top_repo, pattern,
-                    include=["*.js", "*.ts", "*.tsx", "*.jsx", "*.py", "*.json", "*.toml", "*.yaml", "*.yml"],
-                    exclude=["node_modules/*", "vendor/*", "dist/*", "build/*", ".git/*"],
-                    max_matches=10, context_lines=1,
-                ))
-            seen_paths: set[str] = set()
-            for hit in hits:
-                if hit.source in ("local_tool", "sourcebot") and hit.repo == top_repo:
-                    file_key = f"{hit.repo}:{hit.path}"
-                    if file_key not in seen_paths:
-                        seen_paths.add(file_key)
-                        rh = local_tool_read(REPOS_ROOT, top_repo, hit.path, max_lines=200)
-                        if rh:
-                            hits.append(rh)
-                    if len(seen_paths) >= 3:
-                        break
-            precision_count = sum(1 for h in hits if h.source in ("local_tool", "precision_search"))
-            print(f"  Precision: {precision_count} 条精搜结果")
-        except Exception as exc:
-            print(f"  ⚠️  精搜出错: {exc}", file=sys.stderr)
+    precision_count = sum(1 for h in hits if h.source in ("local_tool", "precision_search"))
+    if precision_count:
+        print(f"  Precision: {precision_count} 条精搜结果")
 
     # 8. Evidence pack
     evidence_pack = build_evidence_pack(question, plan, hits, ranked_repos)
