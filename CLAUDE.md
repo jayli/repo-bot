@@ -53,6 +53,10 @@ npm run docker_push:ast-service# 同上，ast-service
 npm run deploy:chat-ui
 ```
 
+**chat-ui 修改完成后的提示规则**：
+- 后续对 `chat-ui` 做代码修改后，默认不要重新构建 Docker，也不要自动执行 `npm run deploy:chat-ui`，除非用户明确要求部署。
+- 修改完成后，在最终回复中提示用户：`修改完成，请你启动 npm run dev 并访问 http://localhost:8501 来测试，测试通过后可以让我部署到 docker`
+
 **ast-service 代码变更生效**：
 ```bash
 npm run deploy:ast-service

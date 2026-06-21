@@ -12,6 +12,7 @@ from retrieval.answer_loop import run_answer_tool_loop
 from retrieval.planner import validate_llm_plan
 from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
+from retrieval.progress import ProgressLog
 from retrieval.tool_dispatch import TOOLS, dispatch_tool
 from prompts.synthesizer import build_system_prompt, build_user_message
 load_dotenv()
@@ -21,6 +22,26 @@ USE_LLM_PLANNER = os.environ.get("LLM_PLANNER_ENABLED", "false").lower() == "tru
 import hashlib
 
 st.set_page_config(page_title="repo-bot", page_icon="🤖", layout="wide")
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMarkdownContainer"] ul {
+        max-width: 100%;
+    }
+    div[data-testid="stMarkdownContainer"] ul li {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.45;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 def _auth_token() -> str:
     user = os.environ.get("CHAT_USERNAME", "admin")
@@ -386,7 +407,9 @@ def ask_llm_with_evidence(
     question: str,
     evidence_pack: dict,
     history: list[dict] | None = None,
+    on_tool_start=None,
     on_tool_call=None,
+    on_tool_error=None,
 ) -> str:
     import anthropic, httpx
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -433,7 +456,9 @@ def ask_llm_with_evidence(
         tools=TOOLS,
         dispatch_tool=_dispatch,
         max_tokens=3000,
+        on_tool_start=on_tool_start,
         on_tool_call=on_tool_call,
+        on_tool_error=on_tool_error,
     )
 
 # === 主界面 ===
@@ -457,11 +482,59 @@ if prompt := st.chat_input("输入你的问题..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        progress_log = ProgressLog(max_items=6)
+        active_progress: dict[str, int] = {}
+        progress_placeholder = st.empty()
+
+        def _short_text(value, limit: int = 100) -> str:
+            text = str(value).replace("\n", " ").strip()
+            return text if len(text) <= limit else text[: limit - 3] + "..."
+
+        def _args_preview(args: dict, limit: int = 120) -> str:
+            return _short_text(json.dumps(args, ensure_ascii=False), limit=limit)
+
+        def _render_progress() -> None:
+            lines = progress_log.lines()
+            progress_placeholder.markdown("#### 调用进度\n" + "\n".join(f"- {item}" for item in lines))
+
+        def _progress_key(label: str, detail: str = "") -> str:
+            return f"{label}\n{detail}"
+
+        def _start_progress(label: str, detail: str = "") -> int:
+            record_id = progress_log.start(label, _short_text(detail, 140))
+            active_progress[_progress_key(label, detail)] = record_id
+            _render_progress()
+            return record_id
+
+        def _complete_progress(record_id: int | None) -> None:
+            if record_id:
+                progress_log.complete(record_id)
+                _render_progress()
+
+        def _fail_progress(record_id: int | None, label: str, error: str) -> None:
+            if record_id:
+                progress_log.fail(record_id, _short_text(error, 140))
+            else:
+                progress_log.error(label, _short_text(error, 140))
+            _render_progress()
+
+        def _run_with_progress(label: str, detail: str, fn):
+            record_id = _start_progress(label, detail)
+            try:
+                value = fn()
+            except Exception as exc:
+                _fail_progress(record_id, label, f"错误: {exc}")
+                raise
+            _complete_progress(record_id)
+            return value
+
         # LLM Planner adapter
         def llm_plan_query(question: str, plan) -> dict:
             if not USE_LLM_PLANNER:
                 return {}
             try:
+                ctx_len = len(plan.entities.get("round1_context", "")) if hasattr(plan, "entities") else 0
+                progress_id = _start_progress("LLM-plan", f"基于问题和 {ctx_len} chars 初步上下文重新规划检索")
                 import anthropic, httpx
                 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if not api_key:
@@ -487,22 +560,55 @@ if prompt := st.chat_input("输入你的问题..."):
                     if hasattr(block, "text") and block.text:
                         llm_text += block.text
                 llm_plan = validate_llm_plan(llm_text)
+                _complete_progress(progress_id)
                 return llm_plan if llm_plan else {}
             except Exception:
+                _fail_progress(locals().get("progress_id"), "LLM-plan", "规划失败，降级使用规则规划")
                 return {}
 
         with st.spinner("搜索中..."):
             repos_root = os.environ.get("REPOS_ROOT", "/repos")
+
+            def _traced_sourcebot(query, top_k):
+                return _run_with_progress("Sourcebot", f'"{query}" top_k={top_k}', lambda: search_sourcebot(query, top_k))
+
+            def _traced_qdrant(query, top_k):
+                return _run_with_progress("Qdrant", f'"{query}" top_k={top_k}', lambda: search_qdrant(query, top_k))
+
+            def _traced_ast(query, results, limit):
+                return _run_with_progress("AST", f'"{query}" limit={limit}', lambda: search_ast_structure(query, results, limit))
+
+            def _traced_graph(query, results, limit):
+                return _run_with_progress("Neo4j", f'"{query}" limit={limit}', lambda: search_graph_relations(query, results, limit))
+
+            def _traced_read_manifest(root, repo):
+                return _run_with_progress("read_manifest", repo, lambda: read_manifest(root, repo))
+
+            def _traced_local_list(root, repo, **kwargs):
+                path = kwargs.get("dir_path", "")
+                return _run_with_progress("local_tool_list", f"{repo}/{path}", lambda: local_tool_list(root, repo, **kwargs))
+
+            def _traced_local_grep(root, repo, **kwargs):
+                pattern = kwargs.get("pattern", "")
+                return _run_with_progress("local_tool_grep", f"{repo} pattern={pattern}", lambda: local_tool_grep(root, repo, **kwargs))
+
+            def _traced_local_read(root, repo, **kwargs):
+                path = kwargs.get("path", "")
+                start = kwargs.get("start_line")
+                end = kwargs.get("end_line")
+                suffix = f":L{start}-{end}" if start or end else ""
+                return _run_with_progress("local_tool_read", f"{repo}/{path}{suffix}", lambda: local_tool_read(root, repo, **kwargs))
+
             backends = RetrievalBackends(
-                search_sourcebot=search_sourcebot,
-                search_qdrant=search_qdrant,
-                search_ast_structure=search_ast_structure,
-                search_graph_relations=search_graph_relations,
+                search_sourcebot=_traced_sourcebot,
+                search_qdrant=_traced_qdrant,
+                search_ast_structure=_traced_ast,
+                search_graph_relations=_traced_graph,
                 read_file_content=read_file_content,
-                read_manifest=read_manifest,
-                local_tool_list=local_tool_list,
-                local_tool_grep=local_tool_grep,
-                local_tool_read=local_tool_read,
+                read_manifest=_traced_read_manifest,
+                local_tool_list=_traced_local_list,
+                local_tool_grep=_traced_local_grep,
+                local_tool_read=_traced_local_read,
                 llm_plan=llm_plan_query,
                 available_repos=get_indexed_repos(),
             )
@@ -515,6 +621,8 @@ if prompt := st.chat_input("输入你的问题..."):
                 use_ast=use_ast,
                 use_graph=use_graph,
             )
+            summary_id = _start_progress("检索循环", f"完成 {len(result.rounds)} 轮，命中 {len(result.hits)} 条")
+            _complete_progress(summary_id)
 
         plan = result.plan
         hits = result.hits
@@ -580,10 +688,31 @@ if prompt := st.chat_input("输入你的问题..."):
                 if len(result_text) > 300:
                     preview += f" ... ({len(result_text)} chars total)"
                 tool_trace.append({"name": name, "args": args, "preview": preview})
+                detail = _args_preview(args)
+                record_id = active_progress.pop(_progress_key(f"LLM tool {name}", detail), None)
+                _complete_progress(record_id)
+
+            def _record_tool_start(name, args):
+                _start_progress(f"LLM tool {name}", _args_preview(args))
+
+            def _record_tool_error(name, args, error):
+                detail = _args_preview(args)
+                record_id = active_progress.pop(_progress_key(f"LLM tool {name}", detail), None)
+                _fail_progress(record_id, f"LLM tool {name}", error)
 
             try:
-                answer = ask_llm_with_evidence(prompt, evidence_pack, history, on_tool_call=_record_tool_call)
+                synthesis_id = _start_progress("LLM synthesis", "基于 Evidence Pack 生成回答")
+                answer = ask_llm_with_evidence(
+                    prompt,
+                    evidence_pack,
+                    history,
+                    on_tool_start=_record_tool_start,
+                    on_tool_call=_record_tool_call,
+                    on_tool_error=_record_tool_error,
+                )
+                _complete_progress(synthesis_id)
             except Exception:
+                _fail_progress(locals().get("synthesis_id"), "LLM synthesis", "工具循环失败，降级到纯 Evidence Pack 回答")
                 # Fallback to old flat answer path
                 ctx_items = [{
                     "repo": r["repo"], "path": r["path"], "line": r["line"],

@@ -30,7 +30,9 @@ def run_answer_tool_loop(
     max_rounds: int = 12,
     max_tool_uses_per_round: int = 15,
     final_instruction: str = "请基于以上的所有工具调用结果，给出最终回答。不要再调用工具。",
+    on_tool_start: Callable[[str, dict[str, Any]], None] | None = None,
     on_tool_call: Callable[[str, dict[str, Any], str], None] | None = None,
+    on_tool_error: Callable[[str, dict[str, Any], str], None] | None = None,
     on_max_rounds: Callable[[], None] | None = None,
 ) -> str:
     """Run an Anthropic-style answer loop with model tool calls.
@@ -65,12 +67,17 @@ def run_answer_tool_loop(
         for tool_use in tool_uses:
             name = tool_use["name"]
             args = tool_use["input"]
+            if on_tool_start:
+                on_tool_start(name, args)
             try:
                 result_text = dispatch_tool(name, args)
             except Exception as exc:
                 result_text = f"错误: {exc}"
-            if on_tool_call:
-                on_tool_call(name, args, result_text)
+                if on_tool_error:
+                    on_tool_error(name, args, result_text)
+            else:
+                if on_tool_call:
+                    on_tool_call(name, args, result_text)
             tool_results.append({"tool_use_id": tool_use["id"], "content": result_text})
 
         for tool_use in tool_uses:

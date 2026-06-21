@@ -78,3 +78,54 @@ def test_run_answer_tool_loop_executes_tool_and_returns_final_answer():
     assert client.messages.calls[1]["messages"][-1]["content"] == [
         {"type": "tool_result", "tool_use_id": "tool-1", "content": "README 内容"}
     ]
+
+
+def test_run_answer_tool_loop_reports_tool_start_before_dispatch():
+    answer_loop = load_module("retrieval.answer_loop")
+    client = FakeClient()
+    events = []
+
+    def dispatch_tool(name, args):
+        events.append(("dispatch", name, args))
+        return "README 内容"
+
+    answer_loop.run_answer_tool_loop(
+        client=client,
+        model="test-model",
+        system="system prompt",
+        messages=[{"role": "user", "content": "question"}],
+        tools=[{"name": "local_tool_read"}],
+        dispatch_tool=dispatch_tool,
+        max_tokens=100,
+        max_rounds=3,
+        on_tool_start=lambda name, args: events.append(("start", name, args)),
+    )
+
+    assert events == [
+        ("start", "local_tool_read", {"repo": "demo", "path": "README.md"}),
+        ("dispatch", "local_tool_read", {"repo": "demo", "path": "README.md"}),
+    ]
+
+
+def test_run_answer_tool_loop_reports_tool_error_without_success_callback():
+    answer_loop = load_module("retrieval.answer_loop")
+    client = FakeClient()
+    events = []
+
+    def dispatch_tool(name, args):
+        raise RuntimeError("boom")
+
+    answer_loop.run_answer_tool_loop(
+        client=client,
+        model="test-model",
+        system="system prompt",
+        messages=[{"role": "user", "content": "question"}],
+        tools=[{"name": "local_tool_read"}],
+        dispatch_tool=dispatch_tool,
+        max_tokens=100,
+        max_rounds=3,
+        on_tool_call=lambda name, args, result: events.append(("success", name, result)),
+        on_tool_error=lambda name, args, error: events.append(("error", name, error)),
+    )
+
+    assert events == [("error", "local_tool_read", "错误: boom")]
