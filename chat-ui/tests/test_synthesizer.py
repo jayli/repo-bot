@@ -39,3 +39,18 @@ def test_synthesizer_system_prompt_constrains_agent_tool_loop():
     assert "repo_roots" in system
     assert "如果需要本地路径，先用全局检索确认候选 repo" in system
     assert "不要建议已经由 Evidence Pack 覆盖的工具调用" in system
+
+
+def test_synthesizer_user_message_leads_with_original_question():
+    synthesizer = load_module("prompts.synthesizer")
+
+    message = synthesizer.build_user_message(
+        "passwall-any 这个仓库的 README.md 文档中不是给了好几个节点链接吗？",
+        {"items": []},
+    )
+
+    assert message.startswith(
+        "最初的问题：passwall-any 这个仓库的 README.md 文档中不是给了好几个节点链接吗？"
+    )
+    assert "一定要围绕最初的问题进行回答" in message
+    assert message.index("最初的问题：") < message.index("Evidence Pack:")

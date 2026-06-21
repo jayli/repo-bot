@@ -10,4 +10,11 @@ def build_system_prompt(template: str) -> str:
 
 
 def build_user_message(question: str, evidence_pack: dict) -> str:
-    return "Evidence Pack:\n" + json.dumps(evidence_pack, ensure_ascii=False, indent=2) + "\n\n问题: " + question
+    return (
+        "最初的问题："
+        + question
+        + "\n\n请一定要围绕最初的问题进行回答。Evidence Pack 只作为证据来源，"
+        + "不要把检索过程、工具调用或与问题无关的中间信息当作最终结论。\n\n"
+        + "Evidence Pack:\n"
+        + json.dumps(evidence_pack, ensure_ascii=False, indent=2)
+    )

@@ -196,6 +196,7 @@ def _stream_final_answer(
     on_final_delta: Callable[[str], None],
 ) -> str:
     text_parts: list[str] = []
+    pending_deltas: list[str] = []
     try:
         with client.messages.stream(
             model=model,
@@ -205,13 +206,34 @@ def _stream_final_answer(
         ) as stream:
             for delta in stream.text_stream:
                 text_parts.append(delta)
+                pending_deltas.append(delta)
+                current_text = "".join(text_parts)
+                if _parse_dsml_tool_calls(current_text):
+                    return ""
+                if _may_be_dsml_prefix(current_text):
+                    continue
                 try:
-                    on_final_delta(delta)
+                    for pending_delta in pending_deltas:
+                        on_final_delta(pending_delta)
+                    pending_deltas = []
                 except Exception:
                     return "".join(text_parts)
     except Exception:
         return ""
+    current_text = "".join(text_parts)
+    if _parse_dsml_tool_calls(current_text):
+        return ""
+    for pending_delta in pending_deltas:
+        try:
+            on_final_delta(pending_delta)
+        except Exception:
+            break
     return "".join(text_parts)
+
+
+def _may_be_dsml_prefix(text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith("<") and ("DSML" in stripped or len(stripped) < 32)
 
 
 def _append_user_instruction(conversation: list[dict[str, Any]], instruction: str) -> None:

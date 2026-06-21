@@ -123,6 +123,24 @@ class FailingStreamClient:
         self.messages = FailingStreamMessages()
 
 
+class DSMLStreamingMessages(StreamingMessages):
+    def stream(self, **kwargs):
+        self.stream_calls.append(kwargs)
+        return FakeStream(
+            [
+                '<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="local_tool_read">',
+                '<｜｜DSML｜｜parameter name="repo" string="true">passwall-any</｜｜DSML｜｜parameter>',
+                '<｜｜DSML｜｜parameter name="path" string="true">README.md</｜｜DSML｜｜parameter>',
+                "</｜｜DSML｜｜invoke> </｜｜DSML｜｜tool_calls>",
+            ]
+        )
+
+
+class DSMLStreamingClient:
+    def __init__(self):
+        self.messages = DSMLStreamingMessages()
+
+
 def test_run_answer_tool_loop_executes_tool_and_returns_final_answer():
     answer_loop = load_module("retrieval.answer_loop")
     client = FakeClient()
@@ -270,6 +288,28 @@ def test_run_answer_tool_loop_streams_final_answer_only_after_tools_finish():
 def test_run_answer_tool_loop_falls_back_to_non_stream_text_when_stream_fails():
     answer_loop = load_module("retrieval.answer_loop")
     client = FailingStreamClient()
+    deltas = []
+
+    answer = answer_loop.run_answer_tool_loop(
+        client=client,
+        model="test-model",
+        system="system prompt",
+        messages=[{"role": "user", "content": "question"}],
+        tools=[{"name": "local_tool_read"}],
+        dispatch_tool=lambda name, args: "README 内容",
+        max_tokens=100,
+        max_rounds=3,
+        on_final_delta=deltas.append,
+    )
+
+    assert answer == "draft answer"
+    assert deltas == []
+    assert len(client.messages.stream_calls) == 1
+
+
+def test_run_answer_tool_loop_suppresses_dsml_text_from_final_stream():
+    answer_loop = load_module("retrieval.answer_loop")
+    client = DSMLStreamingClient()
     deltas = []
 
     answer = answer_loop.run_answer_tool_loop(
