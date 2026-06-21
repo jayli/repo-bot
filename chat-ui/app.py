@@ -760,5 +760,118 @@ if prompt := st.chat_input("输入你的问题..."):
                     st.caption(f"{item['name']}({json.dumps(item['args'], ensure_ascii=False)[:160]})")
                     st.code(item["preview"], language="text")
 
+        # === 操作区（使用 iframe 组件绕过 Streamlit onclick 过滤） ===
+        import html as _html
+
+        def _build_debug_output():
+            parts = []
+            parts.append("# 调试记录\n")
+            parts.append(f"## 问题\n{prompt}\n")
+            parts.append(f"## 检索轮次 ({len(result.rounds)} 轮)")
+            for r in result.rounds:
+                parts.append(
+                    f"- Round {r.index}: Sourcebot={len(r.sourcebot_queries)} "
+                    f"Qdrant={len(r.qdrant_queries)} AST={len(r.ast_queries)} "
+                    f"Graph={len(r.graph_queries)} Local={len(r.local_actions)} "
+                    f"NewHits={r.new_hits}"
+                )
+                if r.notes:
+                    for note in r.notes:
+                        parts.append(f"  - ⚠️ {note}")
+            parts.append("")
+            parts.append(f"## 检索命中 ({len(merged)} 条)")
+            for r in merged[:30]:
+                parts.append(f"- [{r['source']}] `{r['repo']}/{r['path']}:{r['line']}` (score: {r.get('score', '-')})")
+                if r.get("content"):
+                    parts.append(f"\n```{r.get('language', '')}\n{r['content'][:800]}\n```\n")
+            if len(merged) > 30:
+                parts.append(f"\n... 及其他 {len(merged) - 30} 条\n")
+            parts.append("")
+            if ast_facts:
+                parts.append(f"## AST 结构上下文 ({len(ast_facts)} 条)")
+                for fact in ast_facts:
+                    parts.append(f"- {fact}")
+                parts.append("")
+            if graph_facts:
+                parts.append(f"## Neo4j 图关系 ({len(graph_facts)} 条)")
+                for fact in graph_facts:
+                    parts.append(f"- {fact}")
+                parts.append("")
+            parts.append("## Evidence Pack")
+            parts.append(f"- Intent: {evidence_pack.get('intent', '-')}")
+            parts.append(f"- Candidate repos: {evidence_pack.get('candidate_repos', [])}")
+            parts.append(f"- Confidence: {evidence_pack.get('confidence', '-')}")
+            parts.append(f"- Evidence count: {len(evidence_pack.get('evidence', []))}")
+            parts.append("")
+            if tool_trace:
+                parts.append(f"## LLM 工具调用 ({len(tool_trace)} 次)")
+                for item in tool_trace:
+                    parts.append(f"- {item['name']}({json.dumps(item['args'], ensure_ascii=False)[:200]})")
+                    parts.append(f"\n```\n{item['preview']}\n```\n")
+                parts.append("")
+            parts.append("## 最终回答")
+            parts.append(answer)
+            return "\n".join(parts)
+
+        debug_text = _build_debug_output()
+        st.components.v1.html(
+            f"""<!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"><style>
+            body {{ margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }}
+            .actions {{ display: flex; gap: 8px; }}
+            .btn {{ padding: 5px 14px; font-size: 13px; border: 1px solid #ddd;
+                     border-radius: 6px; background: #fff; cursor: pointer; white-space: nowrap; }}
+            .btn-primary {{ color: #1a73e8; border-color: #1a73e8; }}
+            .btn-default {{ color: #666; }}
+        </style></head>
+        <body>
+        <div class="actions">
+            <button class="btn btn-default" onclick="copy('debug-data', this)">📋 全部调试记录</button>
+            <button class="btn btn-default" onclick="copy('answer-data', this)">📝 结论 Markdown</button>
+        </div>
+        <script type="text/plain" id="debug-data">{_html.escape(debug_text)}</script>
+        <script type="text/plain" id="answer-data">{_html.escape(answer)}</script>
+        <script>
+        function copy(dataId, btn) {{
+            var el = document.getElementById(dataId);
+            var text = el.textContent;
+            if (navigator.clipboard && window.isSecureContext) {{
+                navigator.clipboard.writeText(text).then(function() {{
+                    var orig = btn.textContent;
+                    btn.textContent = '✓ 已复制';
+                    setTimeout(function() {{ btn.textContent = orig; }}, 1500);
+                }}).catch(function() {{
+                    fallbackCopy(text, btn);
+                }});
+            }} else {{
+                fallbackCopy(text, btn);
+            }}
+        }}
+        function fallbackCopy(text, btn) {{
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try {{
+                document.execCommand('copy');
+                var orig = btn.textContent;
+                btn.textContent = '✓ 已复制';
+                setTimeout(function() {{ btn.textContent = orig; }}, 1500);
+            }} catch(e) {{
+                var orig = btn.textContent;
+                btn.textContent = '✗ 失败';
+                setTimeout(function() {{ btn.textContent = orig; }}, 1500);
+            }}
+            document.body.removeChild(ta);
+        }}
+        </script>
+        </body>
+        </html>""",
+            height=42,
+        )
+
         st.session_state.messages.append({"role": "assistant", "content": answer})
         _persist_messages()
