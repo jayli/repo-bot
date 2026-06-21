@@ -64,3 +64,6 @@ answer:
   痕迹，但它的版本号和依赖都落后于当前
   package.json/pnpm-lock.yaml，不应作为当前真实依赖关系判断。
 
+以上信息来自于项目：
+- /Users/hfy/jayli/anyproxy
+- /Users/hfy/jayli/block-proxy

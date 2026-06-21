@@ -63,6 +63,13 @@ npm run deploy:ast-service
 docker compose up -d chat-ui
 ```
 
+**运行测试**：
+```bash
+python3 -m pytest chat-ui/tests -q          # chat-ui 全部（47 个）
+cd ast-service && python -m pytest -v       # ast-service（50 个）
+python3 -m pytest chat-ui/tests/test_agent_loop.py -q  # 仅检索循环测试
+```
+
 ## 架构
 
 五个 Docker 服务（`docker-compose.yml`）：
@@ -89,15 +96,79 @@ REPOS_ROOT (只读挂载 :ro)
     │
     └─ Chat UI (Streamlit :8501) — chat-ui/app.py
         侧边栏可独立开关四路检索（Qdrant / Sourcebot / AST / Neo4j 图谱）
-        结果 RRF 融合 + AST 定义 + Neo4j 多跳调用链作为结构上下文喂 LLM
+        通过 run_retrieval_loop() 编排多轮检索 → RRF 融合 → Evidence Pack → LLM 生成回答
         支持多轮对话（最近 10 轮送 LLM），会话以 URL token 持久化在服务端
 ```
 
-**Embedding**：通过环境变量配置（OpenAI 兼容接口），支持任意 embedding 服务。关键变量：`EMBEDDING_MODEL`（默认 text-embedding-v4）、`EMBEDDING_DIM`（默认 1024）、`EMBEDDING_BASE_URL`（默认 DashScope 直连）、`EMBEDDING_API_KEY`（留空则 fallback `DASHSCOPE_API_KEY`）。`chat-ui/app.py` 和 `chat-ui/index_code.py` 均从这些环境变量读取，不再硬编码。
+### Chat UI 检索模块 (`chat-ui/retrieval/`)
 
-**LLM**：`https://yui.cool:996`，Anthropic 协议格式，默认模型由 `LLM_MODEL` 环境变量控制。
+| 模块 | 职责 |
+|------|------|
+| `agent_loop.py` | 检索编排器：`run_retrieval_loop()` — 多轮检索循环、query 扩展、gap 观察、precision 目标选择、discovered-term 提取。不依赖 Streamlit/Anthropic/OpenAI，不直接读 REPOS_ROOT |
+| `planner.py` | 规则规划器：`plan_query()` 意图分类+实体提取、`merge_llm_plan()` 合并 LLM 规划建议（含 `entity_hints` 保留） |
+| `ranking.py` | 仓库排序：`rank_repositories()` 全证据排序、`rank_code_repositories()` 排除 `SYNTHETIC_REPOS`、`should_run_precision_search()` |
+| `precision.py` | 本地精搜工具：`read_manifest()`、`local_tool_grep()`、`local_tool_read()`、`local_tool_list()`，均需 `repos_root` 参数 |
+| `evidence.py` | Evidence Pack 构建：`build_evidence_pack()`、`evidence_tier()`、`_repo_roots()`，导入共享 `SYNTHETIC_REPOS` |
+| `models.py` | 数据类：`RetrievalPlan`、`RetrievalHit`、`EvidenceItem` |
 
-**ast-service SQLite 表结构**：Phase 1 表 `files` / `symbols` / `calls` / `imports` / `index_runs`；Phase 2 SCIP 表 `scip_documents` / `scip_symbols` / `scip_occurrences` / `scip_relationships`。所有查询 JOIN `files` 并过滤 `deleted_at IS NULL`。
+### Multi-Round Retrieval Loop 核心流程
+
+```
+plan_query() → [optional LLM merge] → expand_queries()
+    → Round 1: Sourcebot + Qdrant global search
+    → Snippet hydration (read_file_content)
+    → AST + Graph search (基于 candidate symbols)
+    → confirmed_repos 提取 (排除 SYNTHETIC_REPOS)
+    → rank_code_repositories()
+    → observe_gaps() → LocalAction 执行 (仅 confirmed_repos)
+    → extract_discovered_terms() → Round 2 follow-up Sourcebot 查询
+    → 循环至 max_rounds 或无新 hits
+    → RetrievalLoopResult → build_evidence_pack() → LLM 合成
+```
+
+关键设计决策：
+- `RetrievalBackends` dataclass 注入所有后端函数，测试用 fake backends，生产由 app.py/test_chat.py 传入
+- `confirmed_repos` 仅来自全局搜索结果中非 synthetic 的 repo 名，LLM `entity_hints.likely_repo` 只有出现在 confirmed 后才被接受
+- `observe_gaps()` 纯函数：依赖 `precision_search`/`local_tool` 命中判定是否已满足，不依赖 Sourcebot/Qdrant 片段
+- `SYNTHETIC_REPOS = {"ast-service"}` 定义在 ranking.py，evidence.py 和 agent_loop.py 共用
+- Round 2 先执行本地 gap actions，再用 discovered terms 做全局 Sourcebot 查询
+- `read_file_content(repo, path, start_line, end_line)` 签名不同于 precision 工具（历史原因：闭包 REPOS_ROOT），由调用方注入
+
+### Chat UI 其他模块
+
+| 模块 | 职责 |
+|------|------|
+| `prompts/templates.py` | 系统提示模板：`BASE_SYSTEM`、`TOOL_CATALOG`（四路检索+精搜工具描述及使用原则）、`EVIDENCE_RULES`、`DEPENDENCY_TEMPLATE`、`GENERIC_TEMPLATE` |
+| `prompts/synthesizer.py` | `build_system_prompt(template)` + `build_user_message(question, evidence_pack)` |
+| `sourcebot_client.py` | Sourcebot v4 API client |
+| `app.py` | Streamlit UI，通过 `run_retrieval_loop()` 调用检索，保留侧边栏开关和 expander 展示 |
+| `test_chat.py` | CLI 测试脚本，同样通过 `run_retrieval_loop()` 调用检索 |
+
+### 测试架构 (`chat-ui/tests/`)
+
+47 个测试，7 个文件，均用动态 import 模式（无 pytest 插件依赖）：
+
+```python
+def load_module(name):
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    spec = importlib.util.spec_from_file_location(name, root / (name.replace(".", "/") + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+```
+
+- `test_agent_loop.py` (15 tests): `FakeBackends` / `FakeBackendsWithHits` 注入，验证 planner rewrites 执行、query 扩展、confirmed repos 门控、gap 观察、AST/Graph 调用、max_rounds、early stop
+- `test_ranking.py` (4 tests): 验证 `rank_code_repositories` 排除 synthetic、`rank_repositories` 保留全证据
+- `test_evidence.py` (3 tests): 验证 tier 分级、confidence、repo_roots 排除 synthetic
+- `test_planner.py` (5 tests): 验证意图分类、entity 提取、LLM plan 合并、entity_hints 保留
+- `test_precision.py` (15 tests): 验证本地工具（manifest、grep、read、list）和路径安全
+- `test_sourcebot_client.py` (3 tests)
+- `test_synthesizer.py` (2 tests): 验证系统提示包含证据规则和工具约束
+
+设计文档位于 `docs/superpowers/specs/` 和 `docs/superpowers/plans/`。
 
 ## 关键注意
 
@@ -117,3 +188,6 @@ REPOS_ROOT (只读挂载 :ro)
 - **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。
 - **Chat UI 图检索**：`search_graph_relations()` 通过 `/graph/impact` 查询多跳调用链，两级 fallback：候选符号匹配 → `/symbols?repo=X` 取 top symbols → 逐个查 impact。`query_impact` 和 `query_call_paths` 同时匹配 `Symbol` 和 `ExternalSymbol` 标签（未解析调用目标是 ExternalSymbol）。CALL 子查询使用 `CALL (s) { ... }` 语法（Neo4j 5.x），非旧式 `CALL { WITH s ... }`。
 - **本地开发 SQLite 同步**：`dev` / `dev:ast` 脚本启动时自动检测 `.data/ast.sqlite`，若为空则从容器 `docker cp repo-bot-ast-service-1:/data/ast.sqlite` 同步到宿主机。
+- **agent_loop.py 约束**：不可导入 Streamlit，不可直接构造 Anthropic/OpenAI 客户端，不可直接读取 `REPOS_ROOT`/`os.environ`。`repos_root` 由调用方显式传入。
+- **entity ≠ repo**：`RetrievalPlan.entities["subject"]`/`["object"]` 是搜索词（包名、符号），不是仓库名。仓库资格必须通过全局搜索结果确认。`entity_hints.likely_repo` 仅在被 confirmed_repos 或 ranked_repos 证实后才能用于 precision 目标选择。
+- **app.py 和 test_chat.py 共用一个检索路径**：两者都通过 `RetrievalBackends(...)` 注入后端函数 + `run_retrieval_loop(...)` 执行检索。不要在这两个文件中重复实现检索逻辑。
