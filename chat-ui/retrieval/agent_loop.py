@@ -60,6 +60,7 @@ class RetrievalLoopResult:
     ranked_repos: list[dict]
     confirmed_repos: set[str]
     rounds: list[RetrievalRound]
+    candidate_repos: list[str] = field(default_factory=list)
 
 
 def unique_keep_order(items: list[str]) -> list[str]:
@@ -271,6 +272,92 @@ def select_precision_repos(plan: RetrievalPlan, ranked_repos: list[dict], confir
     return repos
 
 
+def _candidate_repo_terms(question: str, plan: RetrievalPlan) -> list[str]:
+    terms: list[str] = [question]
+    for key in ("raw_terms", "search_facets"):
+        values = plan.entities.get(key, [])
+        if isinstance(values, list):
+            terms.extend([value for value in values if isinstance(value, str)])
+    for values in plan.queries.values():
+        terms.extend([value for value in values if isinstance(value, str)])
+    return unique_keep_order(terms)
+
+
+def _derive_candidate_repos(plan: RetrievalPlan, available_repos: list[str] | None, question: str, limit: int = 5) -> list[str]:
+    if not available_repos:
+        return []
+    candidates: list[str] = []
+    hinted = plan.entities.get("repo_candidates", [])
+    if isinstance(hinted, list):
+        for repo in hinted:
+            if isinstance(repo, str) and repo in available_repos and repo not in candidates:
+                candidates.append(repo)
+                if len(candidates) >= limit:
+                    return candidates
+    entity_hints = plan.entities.get("entity_hints", {})
+    likely_repo = entity_hints.get("likely_repo") if isinstance(entity_hints, dict) else None
+    if isinstance(likely_repo, str) and likely_repo in available_repos and likely_repo not in candidates:
+        candidates.append(likely_repo)
+        if len(candidates) >= limit:
+            return candidates
+
+    terms = [term.lower() for term in _candidate_repo_terms(question, plan)]
+    for repo in available_repos:
+        repo_lower = repo.lower()
+        for term in terms:
+            if len(term) < 4:
+                continue
+            if term in repo_lower or repo_lower in term:
+                if repo not in candidates:
+                    candidates.append(repo)
+                break
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _probe_pattern(plan: RetrievalPlan, question: str) -> str:
+    terms: list[str] = []
+    for key in ("search_facets", "raw_terms"):
+        values = plan.entities.get(key, [])
+        if isinstance(values, list):
+            terms.extend([value for value in values if isinstance(value, str)])
+    terms.append(question)
+    compact = [term for term in unique_keep_order(terms) if term and len(term) >= 2][:10]
+    return "|".join(re.escape(term) for term in compact) or re.escape(question)
+
+
+def _probe_candidate_repos(
+    plan: RetrievalPlan,
+    question: str,
+    repos_root: str,
+    backends: RetrievalBackends,
+    candidate_repos: list[str],
+    confirmed_repos: set[str],
+    probed_repos: set[str],
+    limit: int = 3,
+) -> tuple[list[RetrievalHit], list[LocalAction]]:
+    hits: list[RetrievalHit] = []
+    actions: list[LocalAction] = []
+    pattern = _probe_pattern(plan, question)
+    for repo in candidate_repos:
+        if repo in confirmed_repos or repo in probed_repos:
+            continue
+        probed_repos.add(repo)
+        action = LocalAction("repo_probe_grep", repo, {"pattern": pattern})
+        actions.append(action)
+        try:
+            probe_hits = backends.local_tool_grep(repos_root, repo, pattern=pattern, max_matches=5)
+        except Exception:
+            probe_hits = []
+        if probe_hits:
+            hits.extend(probe_hits)
+            confirmed_repos.add(repo)
+        if len(actions) >= limit:
+            break
+    return hits, actions
+
+
 def _execute_gap_action(action: GapAction, repos_root: str, backends: RetrievalBackends) -> list[RetrievalHit]:
     if not action.repo:
         return []
@@ -349,6 +436,8 @@ def run_retrieval_loop(
     seen_sourcebot_queries: set[str] = set()
 
     confirmed_repos: set[str] = set()
+    candidate_repos = _derive_candidate_repos(plan, backends.available_repos, question)
+    probed_repos: set[str] = set()
     ranked_repos: list[dict] = []
 
     prev_hit_count = 0
@@ -432,9 +521,26 @@ def run_retrieval_loop(
                         plan = merge_llm_plan(plan, llm_result)
                         # Re-expand queries based on LLM-enriched plan
                         queries = expand_queries(question, plan)
+                        candidate_repos = unique_keep_order(candidate_repos + _derive_candidate_repos(plan, backends.available_repos, question))
                         round_notes.append("llm_plan: context-driven re-plan applied")
                 except Exception as e:
                     round_notes.append(f"llm_plan error: {e}")
+
+        round_local_actions: list[LocalAction] = []
+        if candidate_repos:
+            probe_hits, probe_actions = _probe_candidate_repos(
+                plan,
+                question,
+                repos_root,
+                backends,
+                candidate_repos,
+                confirmed_repos,
+                probed_repos,
+            )
+            round_local_actions.extend(probe_actions)
+            if probe_hits:
+                all_hits.extend(probe_hits)
+                ranked_repos = rank_code_repositories(all_hits)
 
         # Precision search via gap observation (every round)
         if should_run_precision_search(plan, ranked_repos):
@@ -466,7 +572,9 @@ def run_retrieval_loop(
                 if new_hits:
                     all_hits.extend(new_hits)
 
-            round_record.local_actions = local_actions
+            round_local_actions.extend(local_actions)
+
+        round_record.local_actions = round_local_actions
 
         round_record.new_hits = len(all_hits) - prev_hit_count
         round_record.notes = round_notes
@@ -516,5 +624,6 @@ def run_retrieval_loop(
         graph_facts=graph_facts,
         ranked_repos=ranked_repos,
         confirmed_repos=confirmed_repos,
+        candidate_repos=candidate_repos,
         rounds=rounds,
     )

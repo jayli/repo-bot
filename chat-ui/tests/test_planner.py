@@ -63,3 +63,33 @@ def test_merge_llm_plan_preserves_entity_hints():
 
     assert merged.entities["entity_hints"]["likely_repo"] == "koa"
     assert merged.entities["entity_hints"]["likely_dependency"] == "koa-router"
+
+
+def test_chinese_proxy_config_query_expands_passwall_facets():
+    planner = load_planner()
+
+    plan = planner.plan_query("科学上网的配置是怎样的")
+
+    facets = plan.entities["search_facets"]
+    assert "passwall" in facets
+    assert "luci-app-passwall" in facets
+    assert "0_default_config" in facets
+    assert "subscribe.lua" in facets
+    assert "节点" in facets
+    assert "订阅" in facets
+    assert "passwall" in plan.queries["sourcebot"]
+    assert "OpenWrt PassWall 科学上网 配置 节点 订阅 透明代理" in plan.queries["qdrant"]
+    assert plan.entities["repo_candidates"] == ["passwall-any"]
+
+
+def test_generic_chinese_config_query_does_not_expand_passwall_auxiliary_facets():
+    planner = load_planner()
+
+    plan = planner.plan_query("数据库连接池怎么配置")
+
+    assert "search_facets" not in plan.entities
+    assert "repo_candidates" not in plan.entities
+    assert "config" not in plan.queries["sourcebot"]
+    assert "uci" not in plan.queries["sourcebot"]
+    assert "global" not in plan.queries["sourcebot"]
+    assert "node" not in plan.queries["sourcebot"]

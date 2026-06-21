@@ -11,6 +11,29 @@ from .models import RetrievalPlan
 TOKEN_RE = re.compile(r"@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9_./:-]*[A-Za-z][A-Za-z0-9_./:-]*")
 VALID_INTENTS = {"dependency_relation", "call_chain", "implementation_location", "troubleshooting", "generic_code_answer"}
 
+DOMAIN_FACETS = [
+    (
+        ("科学上网", "passwall", "openwrt", "代理", "节点", "订阅"),
+        {
+            "facets": [
+                "passwall",
+                "openwrt-passwall",
+                "luci-app-passwall",
+                "0_default_config",
+                "subscribe.lua",
+                "节点",
+                "订阅",
+                "代理",
+                "透明代理",
+            ],
+            "qdrant": ["OpenWrt PassWall 科学上网 配置 节点 订阅 透明代理"],
+            "repo_candidates": ["passwall-any"],
+        },
+    ),
+]
+
+PASSWALL_CONFIG_FACETS = ("config", "uci", "global", "node")
+
 
 def extract_terms(query: str) -> list[str]:
     terms: list[str] = []
@@ -20,6 +43,26 @@ def extract_terms(query: str) -> list[str]:
         if token not in terms:
             terms.append(token)
     return terms
+
+
+def expand_domain_facets(query: str) -> dict[str, list[str]]:
+    facets: list[str] = []
+    qdrant: list[str] = []
+    repo_candidates: list[str] = []
+    query_lower = query.lower()
+    for triggers, expansion in DOMAIN_FACETS:
+        if not any(trigger.lower() in query_lower for trigger in triggers):
+            continue
+        facets = _extend_unique(facets, expansion["facets"], limit=20)
+        qdrant = _extend_unique(qdrant, expansion["qdrant"], limit=8)
+        repo_candidates = _extend_unique(repo_candidates, expansion["repo_candidates"], limit=8)
+    if facets and any(trigger in query_lower for trigger in ("配置", "config", "uci")):
+        facets = _extend_unique(facets, list(PASSWALL_CONFIG_FACETS), limit=20)
+    return {
+        "facets": facets,
+        "qdrant": qdrant,
+        "repo_candidates": repo_candidates,
+    }
 
 
 def classify_query(query: str) -> str:
@@ -37,17 +80,24 @@ def classify_query(query: str) -> str:
 def plan_query(query: str) -> RetrievalPlan:
     intent = classify_query(query)
     terms = extract_terms(query)
-    entities: dict[str, object] = {"raw_terms": terms, "symbols": terms}
+    domain = expand_domain_facets(query)
+    search_facets = domain["facets"]
+    raw_terms = _extend_unique(terms, search_facets, limit=20)
+    entities: dict[str, object] = {"raw_terms": raw_terms, "symbols": raw_terms}
+    if search_facets:
+        entities["search_facets"] = search_facets
+    if domain["repo_candidates"]:
+        entities["repo_candidates"] = domain["repo_candidates"]
     if intent == "dependency_relation" and len(terms) >= 2:
         entities["subject"] = terms[0]
         entities["object"] = terms[1]
-    elif terms:
-        entities["subject"] = terms[0]
+    elif raw_terms:
+        entities["subject"] = raw_terms[0]
 
-    sourcebot_queries = terms[:5] or [query]
-    qdrant_queries = [query]
-    ast_queries = terms[:5]
-    graph_queries = terms[:5]
+    sourcebot_queries = _extend_unique(terms[:5] or [query], search_facets, limit=8)
+    qdrant_queries = _extend_unique([query], domain["qdrant"], limit=4)
+    ast_queries = raw_terms[:5]
+    graph_queries = raw_terms[:5]
     precision_enabled = intent in {"dependency_relation", "call_chain", "troubleshooting"}
 
     return RetrievalPlan(
@@ -62,7 +112,7 @@ def plan_query(query: str) -> RetrievalPlan:
         },
         precision={
             "enabled": precision_enabled,
-            "patterns": terms[:5] or [query],
+            "patterns": raw_terms[:8] or [query],
             "read_manifests": intent == "dependency_relation",
         },
     )
@@ -104,6 +154,18 @@ def merge_llm_plan(base: RetrievalPlan, llm_plan: dict[str, Any]) -> RetrievalPl
     entity_hints = llm_plan.get("entity_hints")
     if isinstance(entity_hints, dict):
         entities["entity_hints"] = entity_hints
+    repo_candidates = llm_plan.get("repo_candidates")
+    if isinstance(repo_candidates, list):
+        existing = entities.get("repo_candidates", [])
+        if not isinstance(existing, list):
+            existing = []
+        entities["repo_candidates"] = _extend_unique(existing, repo_candidates)
+    search_facets = llm_plan.get("search_facets")
+    if isinstance(search_facets, list):
+        existing = entities.get("search_facets", [])
+        if not isinstance(existing, list):
+            existing = []
+        entities["search_facets"] = _extend_unique(existing, search_facets, limit=20)
     intent = llm_plan.get("intent")
     if isinstance(intent, str) and intent in VALID_INTENTS:
         return replace(base, intent=intent, template=intent, queries=queries, precision=precision, entities=entities)

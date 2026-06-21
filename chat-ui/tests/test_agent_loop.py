@@ -437,3 +437,74 @@ def test_round2_uses_llm_enriched_queries():
     assert "MITM_handler" in fake.sourcebot_queries
     # Intent should be updated by LLM
     assert result.plan.intent == "call_chain"
+
+
+class FakePasswallDiscoveryBackends(FakeBackendsWithHits):
+    def __init__(self):
+        super().__init__()
+        self.probed_repos = []
+
+    def search_sourcebot(self, query, top_k):
+        self.sourcebot_queries.append(query)
+        return []
+
+    def search_qdrant(self, query, top_k):
+        self.qdrant_queries.append(query)
+        return [
+            {
+                "repo": "Xray-core",
+                "path": "README.md",
+                "line": "L1",
+                "start_line": 1,
+                "end_line": 5,
+                "content": "Project X Xray-core network tool",
+                "score": 0.82,
+            }
+        ]
+
+    def local_tool_grep(self, repos_root, repo, **kwargs):
+        self.grep_calls.append({"repo": repo, **kwargs})
+        if repo == "passwall-any":
+            self.probed_repos.append(repo)
+            models = load_module("retrieval.models")
+            return [
+                models.RetrievalHit(
+                    "local_tool",
+                    "passwall-any",
+                    "openwrt-passwall/luci-app-passwall/root/usr/share/passwall/0_default_config",
+                    "L1-L5",
+                    "config global option dns_mode 'tcp' option tcp_proxy_mode 'proxy'",
+                    "probe",
+                )
+            ]
+        return []
+
+    def llm_plan(self, question, plan):
+        self.llm_plan_context = plan.entities.get("round1_context", "") if hasattr(plan, "entities") else ""
+        return {}
+
+
+def test_chinese_proxy_config_query_probes_and_confirms_passwall_candidate():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakePasswallDiscoveryBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+        fake.llm_plan,
+        available_repos=["Xray-core", "passwall-any"],
+    )
+
+    result = agent_loop.run_retrieval_loop("科学上网的配置是怎样的", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    assert "passwall-any" in result.candidate_repos
+    assert "passwall-any" in result.confirmed_repos
+    assert "passwall-any" in fake.probed_repos
+    actions = [action for r in result.rounds for action in r.local_actions]
+    assert any(action.repo == "passwall-any" for action in actions)
