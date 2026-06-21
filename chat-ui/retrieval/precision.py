@@ -179,3 +179,56 @@ def local_tool_read(
         "file_confirmed",
         metadata={"total_lines": total},
     )
+
+
+def local_tool_list(
+    repos_root: str,
+    repo: str,
+    dir_path: str = "",
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    max_entries: int = 200,
+) -> list[RetrievalHit]:
+    """列出仓库内某个目录下的文件列表。
+
+    Args:
+        repos_root: 仓库根目录
+        repo: 仓库名
+        dir_path: 仓库内相对目录路径，空字符串表示仓库根目录
+        include: 文件白名单 glob，如 ['*.js', '*.ts']。None 表示不限制。
+        exclude: 文件黑名单 glob，如 ['node_modules/*', '.git/*']。
+        max_entries: 最多返回条目数
+    """
+    repo_path = _repo_root(repos_root, repo)
+    target_dir = (repo_path / dir_path).resolve() if dir_path else repo_path
+    if repo_path != target_dir and repo_path not in target_dir.parents:
+        raise ValueError("directory path is outside REPOS_ROOT")
+    if not target_dir.exists() or not target_dir.is_dir():
+        return []
+    exclude = exclude or []
+    entries: list[RetrievalHit] = []
+    for entry_path in sorted(target_dir.iterdir()):
+        if len(entries) >= max_entries:
+            break
+        rel = entry_path.relative_to(repo_path).as_posix()
+        if any(fnmatch.fnmatch(rel, pat) for pat in exclude):
+            continue
+        if include is not None:
+            if not any(fnmatch.fnmatch(rel, pat) for pat in include):
+                continue
+        try:
+            st = entry_path.stat()
+            size = st.st_size
+        except OSError:
+            size = -1
+        entry_type = "dir" if entry_path.is_dir() else "file"
+        entries.append(RetrievalHit(
+            "local_tool",
+            repo,
+            rel + ("/" if entry_type == "dir" else ""),
+            "",
+            "",
+            "file_confirmed",
+            metadata={"type": entry_type, "size": size},
+        ))
+    return entries

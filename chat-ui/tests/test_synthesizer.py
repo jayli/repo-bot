@@ -21,3 +21,7 @@ def test_synthesizer_system_prompt_contains_evidence_rules():
     assert "不要编造" in system
     assert "实事求是" in system
     assert "依赖链路" in system
+    assert "local_tool_grep" in system
+    assert "search_sourcebot" in system
+    assert "search_qdrant" in system
+    assert "read_manifest" in system

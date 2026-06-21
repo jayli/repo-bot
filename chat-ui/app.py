@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
 from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
 from retrieval.ranking import rank_repositories, should_run_precision_search
-from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read
+from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
 from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
@@ -497,6 +497,12 @@ if prompt := st.chat_input("输入你的问题..."):
             try:
                 if plan.precision.get("read_manifests"):
                     hits.extend(read_manifest(repos_root, top_repo))
+                    # 列出仓库顶层文件结构，帮助 LLM 理解项目组织
+                    hits.extend(local_tool_list(
+                        repos_root, top_repo, dir_path="",
+                        exclude=["node_modules/*", ".git/*", "__pycache__/*", "dist/*", "build/*", ".next/*", "vendor/*"],
+                        max_entries=100,
+                    ))
                 for pattern in plan.precision.get("patterns", [])[:5]:
                     hits.extend(local_tool_grep(
                         repos_root, top_repo, pattern,

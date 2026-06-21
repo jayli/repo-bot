@@ -134,3 +134,76 @@ def test_local_tool_read_returns_none_for_missing_file(tmp_path):
     hit = precision.local_tool_read(str(tmp_path), "test-repo", "nonexistent.js")
 
     assert hit is None
+
+
+def test_local_tool_list_lists_files_and_dirs(tmp_path):
+    precision = load_precision()
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "main.js").write_text("// main", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src/utils.js").write_text("// utils", encoding="utf-8")
+    (repo / "README.md").write_text("# Test", encoding="utf-8")
+
+    hits = precision.local_tool_list(str(tmp_path), "test-repo")
+
+    paths = {h.path for h in hits}
+    assert "main.js" in paths
+    assert "src/" in paths
+    assert "README.md" in paths
+    assert all(h.source == "local_tool" for h in hits)
+
+
+def test_local_tool_list_respects_include(tmp_path):
+    precision = load_precision()
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "main.js").write_text("", encoding="utf-8")
+    (repo / "README.md").write_text("", encoding="utf-8")
+    (repo / "data.json").write_text("", encoding="utf-8")
+
+    hits = precision.local_tool_list(str(tmp_path), "test-repo", include=["*.js"])
+
+    assert len(hits) == 1
+    assert hits[0].path == "main.js"
+
+
+def test_local_tool_list_respects_exclude(tmp_path):
+    precision = load_precision()
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "main.js").write_text("", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules/lib.js").write_text("", encoding="utf-8")
+
+    hits = precision.local_tool_list(str(tmp_path), "test-repo", exclude=["node_modules/*"])
+
+    paths = {h.path for h in hits}
+    assert "main.js" in paths
+    # node_modules/ 目录本身仍会列出，但内部文件被排除
+    assert "node_modules/" in paths
+    assert not any("node_modules/lib" in p for p in paths)
+
+
+def test_local_tool_list_subdir(tmp_path):
+    precision = load_precision()
+    repo = tmp_path / "test-repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src/utils.js").write_text("", encoding="utf-8")
+    (repo / "src/index.js").write_text("", encoding="utf-8")
+
+    hits = precision.local_tool_list(str(tmp_path), "test-repo", dir_path="src")
+
+    assert len(hits) == 2
+    assert {h.path for h in hits} == {"src/utils.js", "src/index.js"}
+
+
+def test_local_tool_list_rejects_path_escape(tmp_path):
+    precision = load_precision()
+    try:
+        precision.local_tool_list(str(tmp_path), "../outside", "")
+    except ValueError as exc:
+        assert "outside REPOS_ROOT" in str(exc)
+    else:
+        raise AssertionError("expected path escape to fail")

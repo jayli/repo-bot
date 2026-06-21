@@ -31,7 +31,7 @@ from qdrant_client import QdrantClient
 
 from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
 from retrieval.ranking import rank_repositories, should_run_precision_search
-from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read
+from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
 from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
@@ -407,6 +407,11 @@ def main():
         try:
             if plan.precision.get("read_manifests"):
                 hits.extend(read_manifest(REPOS_ROOT, top_repo))
+                hits.extend(local_tool_list(
+                    REPOS_ROOT, top_repo, dir_path="",
+                    exclude=["node_modules/*", ".git/*", "__pycache__/*", "dist/*", "build/*", ".next/*", "vendor/*"],
+                    max_entries=100,
+                ))
             for pattern in plan.precision.get("patterns", [])[:5]:
                 hits.extend(local_tool_grep(
                     REPOS_ROOT, top_repo, pattern,
