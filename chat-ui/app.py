@@ -7,11 +7,10 @@ from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
 from sourcebot_client import search_sourcebot as search_sourcebot_client
-from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
-from retrieval.ranking import rank_repositories, should_run_precision_search
-from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read, local_tool_list
+from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
+from retrieval.planner import validate_llm_plan, merge_llm_plan
+from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
-from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
 load_dotenv()
 
@@ -146,35 +145,6 @@ def read_file_content(repo: str, path: str, start_line: int, end_line: int) -> s
         return "".join(lines[max(0, start_line - 1):end_line])
     except Exception:
         return ""
-
-def to_hits(results: list[dict], source: str) -> list[RetrievalHit]:
-    hits = []
-    for r in results:
-        line = r.get("line") or f"L{r.get('start_line', 1)}"
-        hits.append(RetrievalHit(
-            source=source,
-            repo=r.get("repo", ""),
-            path=r.get("path", ""),
-            line_range=line,
-            content=r.get("content", ""),
-            strength="exact_text" if source == "sourcebot" else "semantic",
-            score=r.get("score"),
-        ))
-    return hits
-
-def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
-    k = 60
-    scores, all_r = {}, {}
-    for rank, r in enumerate(src):
-        key = f"{r['repo']}:{r['path']}:{r['line']}"
-        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
-        all_r[key] = r
-    for rank, r in enumerate(qdr):
-        key = f"{r['repo']}:{r['path']}:{r['line']}"
-        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
-        all_r[key] = r
-    ranked = sorted(scores.items(), key=lambda x: -x[1])[:top_k]
-    return [all_r[k] for k, _ in ranked]
 
 def candidate_symbols(query: str, results: list[dict], limit: int = 8) -> list[str]:
     import re
@@ -439,99 +409,89 @@ if prompt := st.chat_input("输入你的问题..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        plan = plan_query(prompt)
-
-        if USE_LLM_PLANNER and plan.intent in {"dependency_relation", "call_chain", "troubleshooting"}:
+        # LLM Planner adapter
+        def llm_plan_query(question: str, plan) -> dict:
+            if not USE_LLM_PLANNER or plan.intent not in {"dependency_relation", "call_chain", "troubleshooting"}:
+                return {}
             try:
                 import anthropic, httpx
                 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+                if not api_key:
+                    return {}
                 base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
-                if api_key:
-                    client_kwargs = {"api_key": api_key}
-                    if base_url:
-                        client_kwargs["base_url"] = base_url
-                    client_kwargs["http_client"] = httpx.Client(verify=False)
-                    client = anthropic.Anthropic(**client_kwargs)
-                    resp = client.messages.create(
-                        model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-                        max_tokens=500,
-                        system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
-                        messages=[{"role": "user", "content": f"问题：{prompt}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
-                    )
-                    text = ""
-                    for block in resp.content:
-                        if hasattr(block, "text") and block.text:
-                            text += block.text
-                    llm_plan = validate_llm_plan(text)
-                    if llm_plan:
-                        plan = merge_llm_plan(plan, llm_plan)
+                client_kwargs = {"api_key": api_key}
+                if base_url:
+                    client_kwargs["base_url"] = base_url
+                client_kwargs["http_client"] = httpx.Client(verify=False)
+                client = anthropic.Anthropic(**client_kwargs)
+                resp = client.messages.create(
+                    model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+                    max_tokens=500,
+                    system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
+                    messages=[{"role": "user", "content": f"问题：{question}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
+                )
+                llm_text = ""
+                for block in resp.content:
+                    if hasattr(block, "text") and block.text:
+                        llm_text += block.text
+                llm_plan = validate_llm_plan(llm_text)
+                return llm_plan if llm_plan else {}
             except Exception:
-                pass  # Fallback: keep rule planner result
+                return {}
 
         with st.spinner("搜索中..."):
-            src = search_sourcebot(prompt) if use_sourcebot else []
-            qdr = search_qdrant(prompt) if use_qdrant else []
-            merged = merge_results(src, qdr)
+            repos_root = os.environ.get("REPOS_ROOT", "/repos")
+            backends = RetrievalBackends(
+                search_sourcebot=search_sourcebot,
+                search_qdrant=search_qdrant,
+                search_ast_structure=search_ast_structure,
+                search_graph_relations=search_graph_relations,
+                read_file_content=read_file_content,
+                read_manifest=read_manifest,
+                local_tool_list=local_tool_list,
+                local_tool_grep=local_tool_grep,
+                local_tool_read=local_tool_read,
+                llm_plan=llm_plan_query,
+            )
+            result = run_retrieval_loop(
+                prompt,
+                repos_root=repos_root,
+                backends=backends,
+                use_sourcebot=use_sourcebot,
+                use_qdrant=use_qdrant,
+                use_ast=use_ast,
+                use_graph=use_graph,
+            )
 
-        for r in merged:
-            if not r.get("content"):
-                r["content"] = read_file_content(
-                    r["repo"], r["path"],
-                    r.get("start_line", 1), r.get("end_line", r.get("start_line", 1) + 30))
-
-        ast_facts = search_ast_structure(prompt, merged) if use_ast else []
-        graph_facts = search_graph_relations(prompt, merged) if use_graph else []
-
-        # Build typed hits for ranking and evidence
-        hits = to_hits(src, "sourcebot") + to_hits(qdr, "qdrant")
-        for fact in ast_facts:
-            hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
-        for fact in graph_facts:
-            hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
-        ranked_repos = rank_repositories(hits)
-
-        # Precision search for complex queries
-        repos_root = os.environ.get("REPOS_ROOT", "/repos")
-        if should_run_precision_search(plan, ranked_repos):
-            top_repo = ranked_repos[0]["repo"]
-            try:
-                if plan.precision.get("read_manifests"):
-                    hits.extend(read_manifest(repos_root, top_repo))
-                    # 列出仓库顶层文件结构，帮助 LLM 理解项目组织
-                    hits.extend(local_tool_list(
-                        repos_root, top_repo, dir_path="",
-                        exclude=["node_modules/*", ".git/*", "__pycache__/*", "dist/*", "build/*", ".next/*", "vendor/*"],
-                        max_entries=100,
-                    ))
-                for pattern in plan.precision.get("patterns", [])[:5]:
-                    hits.extend(local_tool_grep(
-                        repos_root, top_repo, pattern,
-                        include=["*.js", "*.ts", "*.tsx", "*.jsx", "*.py", "*.json", "*.toml", "*.yaml", "*.yml"],
-                        exclude=["node_modules/*", "vendor/*", "dist/*", "build/*", ".git/*"],
-                        max_matches=10, context_lines=1,
-                    ))
-                # 对 grep 命中和 merged 结果中排名最高的文件做精读
-                seen_paths: set[str] = set()
-                for hit in hits:
-                    if hit.source in ("local_tool", "sourcebot") and hit.repo == top_repo:
-                        file_key = f"{hit.repo}:{hit.path}"
-                        if file_key not in seen_paths:
-                            seen_paths.add(file_key)
-                            rh = local_tool_read(repos_root, top_repo, hit.path, max_lines=200)
-                            if rh:
-                                hits.append(rh)
-                        if len(seen_paths) >= 3:
-                            break
-            except Exception as exc:
-                st.warning(f"精搜过程出错: {exc}")
+        plan = result.plan
+        hits = result.hits
+        merged = result.merged
+        ast_facts = result.ast_facts
+        graph_facts = result.graph_facts
+        ranked_repos = result.ranked_repos
 
         # 构建来源统计标题
-        src_parts = [f"{len(src)} Sourcebot", f"{len(qdr)} Qdrant"]
+        src_count = len([h for h in hits if h.source == "sourcebot"])
+        qdr_count = len([h for h in hits if h.source == "qdrant"])
+        src_parts = [f"{src_count} Sourcebot", f"{qdr_count} Qdrant"]
         if use_ast:
             src_parts.append(f"{len(ast_facts)} AST")
         if use_graph:
             src_parts.append(f"{len(graph_facts)} Neo4j")
         src_title = " + ".join(src_parts)
+
+        # Round diagnostics
+        with st.expander(f"检索轮次 {len(result.rounds)}", expanded=False):
+            for round_info in result.rounds:
+                st.caption(
+                    f"Round {round_info.index}: Sourcebot={len(round_info.sourcebot_queries)} "
+                    f"Qdrant={len(round_info.qdrant_queries)} AST={len(round_info.ast_queries)} "
+                    f"Graph={len(round_info.graph_queries)} Local={len(round_info.local_actions)} "
+                    f"NewHits={round_info.new_hits}"
+                )
+                if round_info.notes:
+                    for note in round_info.notes:
+                        st.caption(f"  ⚠️ {note}")
 
         with st.expander(f"📎 检索到 {len(merged)} 条 ({src_title})", expanded=False):
             if st.session_state.get("sourcebot_error"):
