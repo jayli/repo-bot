@@ -217,9 +217,6 @@ def observe_gaps(
 ) -> list[GapAction]:
     actions: list[GapAction] = []
 
-    if plan.intent != "dependency_relation":
-        return actions
-
     candidate_repos: list[str] = []
     for item in ranked_repos:
         repo = item.get("repo", "")
@@ -237,8 +234,16 @@ def observe_gaps(
     for repo in candidate_repos:
         if not _repo_has_manifest_hit(hits, repo):
             actions.append(GapAction("MissingManifest", repo=repo, priority=10))
-        if dependency_term and not _repo_has_term_hit(hits, repo, dependency_term):
-            actions.append(GapAction("MissingImport", repo=repo, package_name=dependency_term, priority=20))
+        if plan.intent == "dependency_relation":
+            if dependency_term and not _repo_has_term_hit(hits, repo, dependency_term):
+                actions.append(GapAction("MissingImport", repo=repo, package_name=dependency_term, priority=20))
+        else:
+            raw_terms = plan.entities.get("raw_terms", [])
+            if isinstance(raw_terms, list):
+                for term in raw_terms[:3]:
+                    if isinstance(term, str) and term and not _repo_has_term_hit(hits, repo, term):
+                        actions.append(GapAction("MissingTerm", repo=repo, package_name=term, priority=30))
+                        break
 
     seen: set[tuple] = set()
     deduped: list[GapAction] = []
@@ -278,6 +283,35 @@ def _execute_gap_action(action: GapAction, repos_root: str, backends: RetrievalB
     return []
 
 
+def _build_context_for_llm(merged: list[dict], confirmed_repos: set[str], max_items: int = 10) -> str:
+    from .ranking import SYNTHETIC_REPOS
+
+    lines: list[str] = []
+    real_repos = sorted(confirmed_repos - SYNTHETIC_REPOS)
+    if real_repos:
+        lines.append(f"已确认仓库: {', '.join(real_repos)}")
+    else:
+        lines.append("(未确认到具体代码仓库)")
+
+    shown = 0
+    for item in merged:
+        repo = item.get("repo", "")
+        if repo in SYNTHETIC_REPOS:
+            continue
+        path = item.get("path", "")
+        line = item.get("line", "")
+        content = item.get("content", "")[:200]
+        if not content:
+            continue
+        lines.append(f"- [{repo}] {path}:{line}")
+        lines.append(f"  ```\n  {content}\n  ```")
+        shown += 1
+        if shown >= max_items:
+            break
+
+    return "\n".join(lines)
+
+
 def run_retrieval_loop(
     question: str,
     *,
@@ -292,17 +326,10 @@ def run_retrieval_loop(
     from .planner import merge_llm_plan, plan_query
     from .ranking import rank_code_repositories, should_run_precision_search
 
-    # 1. Initial Planning
+    # 1. Initial Planning (rule-based, no LLM)
     plan = plan_query(question)
-    if backends.llm_plan:
-        try:
-            llm_result = backends.llm_plan(question, plan)
-            if isinstance(llm_result, dict) and llm_result:
-                plan = merge_llm_plan(plan, llm_result)
-        except Exception:
-            pass
 
-    # 2. Query Expansion
+    # 2. Query Expansion (based on rule plan only)
     queries = expand_queries(question, plan)
 
     all_sourcebot_results: list[dict] = []
@@ -389,6 +416,20 @@ def run_retrieval_loop(
             for fact in graph_facts:
                 all_hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
 
+            # ── Phase 2: LLM context-driven planning (after Round 1 discovery) ──
+            if backends.llm_plan:
+                context = _build_context_for_llm(all_merged, confirmed_repos)
+                plan.entities["round1_context"] = context
+                try:
+                    llm_result = backends.llm_plan(question, plan)
+                    if isinstance(llm_result, dict) and llm_result:
+                        plan = merge_llm_plan(plan, llm_result)
+                        # Re-expand queries based on LLM-enriched plan
+                        queries = expand_queries(question, plan)
+                        round_notes.append("llm_plan: context-driven re-plan applied")
+                except Exception as e:
+                    round_notes.append(f"llm_plan error: {e}")
+
         # Precision search via gap observation (every round)
         if should_run_precision_search(plan, ranked_repos):
             gaps = observe_gaps(plan, all_hits, ranked_repos, confirmed_repos)
@@ -397,7 +438,7 @@ def run_retrieval_loop(
             for gap in gaps:
                 if gap.kind == "MissingManifest" and gap.repo:
                     local_actions.append(LocalAction("read_manifest", gap.repo))
-                elif gap.kind == "MissingImport" and gap.repo and gap.package_name:
+                elif gap.kind in ("MissingImport", "MissingTerm") and gap.repo and gap.package_name:
                     local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.package_name)}))
                 elif gap.kind == "MissingApiUsage" and gap.repo and gap.symbol:
                     local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.symbol)}))
@@ -430,35 +471,36 @@ def run_retrieval_loop(
         if round_record.new_hits == 0 and not is_first_round:
             break
 
-        # After round 1, try follow-up with discovered terms
+        # After round 1, follow-up with LLM rewrites + discovered terms
         if is_first_round and round_idx < max_rounds:
             discovered = extract_discovered_terms(all_hits)
-            if discovered:
-                new_queries = [t for t in discovered if t not in seen_sourcebot_queries]
-                if new_queries and use_sourcebot:
-                    for q in new_queries[:5]:
-                        seen_sourcebot_queries.add(q)
-                        try:
-                            results = backends.search_sourcebot(q, 5)
-                            all_sourcebot_results.extend(results)
-                        except Exception as e:
-                            round_notes.append(f"sourcebot follow-up error ({q}): {e}")
-                    # Rebuild hits and ranking for next round
-                    src_hits = to_hits(all_sourcebot_results, "sourcebot")
-                    qdr_hits = to_hits(all_qdrant_results, "qdrant")
-                    all_hits = list(src_hits) + list(qdr_hits)
-                    for fact in ast_facts:
-                        all_hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
-                    for fact in graph_facts:
-                        all_hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
-                    all_merged = merge_results(all_sourcebot_results, all_qdrant_results)
-                    all_merged = _hydrate_merged_content(all_merged, backends)
-                    confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
-                    ranked_repos = rank_code_repositories(all_hits)
-                else:
-                    break  # No new queries to run
-            else:
-                break  # No discovered terms
+            followup_queries: list[str] = []
+            for q in queries["sourcebot"]:
+                if q not in seen_sourcebot_queries:
+                    followup_queries.append(q)
+            for t in discovered:
+                if t not in seen_sourcebot_queries and t not in followup_queries:
+                    followup_queries.append(t)
+            if followup_queries and use_sourcebot:
+                for q in followup_queries[:8]:
+                    seen_sourcebot_queries.add(q)
+                    try:
+                        results = backends.search_sourcebot(q, 5)
+                        all_sourcebot_results.extend(results)
+                    except Exception as e:
+                        round_notes.append(f"sourcebot follow-up error ({q}): {e}")
+                # Rebuild hits and ranking for next round
+                src_hits = to_hits(all_sourcebot_results, "sourcebot")
+                qdr_hits = to_hits(all_qdrant_results, "qdrant")
+                all_hits = list(src_hits) + list(qdr_hits)
+                for fact in ast_facts:
+                    all_hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
+                for fact in graph_facts:
+                    all_hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
+                all_merged = merge_results(all_sourcebot_results, all_qdrant_results)
+                all_merged = _hydrate_merged_content(all_merged, backends)
+                confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
+                ranked_repos = rank_code_repositories(all_hits)
 
     return RetrievalLoopResult(
         plan=plan,

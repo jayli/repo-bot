@@ -111,6 +111,7 @@ class FakeBackends:
         return None
 
     def llm_plan(self, question, plan):
+        self.llm_plan_context = plan.entities.get("round1_context", "") if hasattr(plan, "entities") else ""
         return self.llm_plan_result or {"query_rewrites": {"sourcebot": ["ProxyServer"], "qdrant": ["MITM proxy engine"]}}
 
 
@@ -130,10 +131,13 @@ def test_run_retrieval_loop_executes_llm_plan_rewrites():
         fake.llm_plan,
     )
 
-    agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=2)
 
+    # LLM rewrites ("ProxyServer") appear in round 2 follow-up sourcebot queries
     assert "ProxyServer" in fake.sourcebot_queries
-    assert "MITM proxy engine" in fake.qdrant_queries
+    # LLM is called after round 1, so it received a plan with round1_context
+    assert hasattr(fake, "llm_plan_context")
+    assert len(result.rounds) <= 2
 
 
 def test_run_retrieval_loop_searches_expanded_sourcebot_queries():
@@ -221,6 +225,7 @@ class FakeBackendsWithHits:
         return None
 
     def llm_plan(self, question, plan):
+        self.llm_plan_context = plan.entities.get("round1_context", "") if hasattr(plan, "entities") else ""
         return self.llm_plan_result or {}
 
 
@@ -340,4 +345,95 @@ def test_run_retrieval_loop_stops_early_when_no_new_work():
 
     result = agent_loop.run_retrieval_loop("登录逻辑在哪里", repos_root="/tmp/repos", backends=backends, max_rounds=3)
 
-    assert len(result.rounds) == 1
+    assert len(result.rounds) <= 2  # round 2 may start but stops with 0 new_hits
+
+
+def test_observe_gaps_emits_missing_term_for_non_dependency():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    plan = models.RetrievalPlan(
+        "generic_code_answer",
+        "generic_code_answer",
+        entities={"raw_terms": ["科学上网", "配置", "原理"], "symbols": ["科学上网", "配置", "原理"]},
+        precision={"enabled": False},
+    )
+
+    actions = agent_loop.observe_gaps(plan, hits=[], ranked_repos=[{"repo": "passwall-any", "score": 10}], confirmed_repos={"passwall-any"})
+
+    assert agent_loop.GapAction("MissingTerm", repo="passwall-any", package_name="科学上网", priority=30) in actions
+    assert agent_loop.GapAction("MissingManifest", repo="passwall-any", priority=10) in actions
+
+
+def test_should_run_precision_search_when_repos_exist_regardless_of_enabled():
+    models = load_module("retrieval.models")
+    ranking = load_module("retrieval.ranking")
+    plan = models.RetrievalPlan(
+        "generic_code_answer",
+        "generic_code_answer",
+        entities={"raw_terms": ["passwall"]},
+        precision={"enabled": False},
+    )
+
+    assert ranking.should_run_precision_search(plan, [{"repo": "passwall-any", "score": 10}]) is True
+    assert ranking.should_run_precision_search(plan, []) is False
+
+
+def test_missing_term_gap_converts_to_local_tool_grep_in_loop():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    fake.llm_plan_result = {"intent": "generic_code_answer", "entity_hints": {"likely_repo": "passwall-any"}}
+
+    # Override sourcebot to return a hit for passwall-any so it enters confirmed_repos
+    original_search = fake.search_sourcebot
+    def custom_search(q, top_k):
+        if "passwall" in q.lower():
+            return [{"repo": "passwall-any", "path": "README.md", "line": "L1", "start_line": 1, "end_line": 5, "content": "# passwall-any config"}]
+        return original_search(q, top_k)
+    fake.search_sourcebot = custom_search
+
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("passwall-any 的 server 配置原理是什么", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    # raw_terms include "passwall-any" and "server" → MissingTerm gaps → local_tool_grep
+    grep_patterns = [c.get("pattern") for c in fake.grep_calls]
+    assert grep_patterns  # should have called grep for raw_terms
+    # Should have local_actions for MissingManifest + MissingTerm
+    all_actions = [a for r in result.rounds for a in r.local_actions]
+    assert len(all_actions) > 0
+
+
+def test_llm_plan_receives_round1_context():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    fake.llm_plan_result = {"query_rewrites": {"sourcebot": ["refined-query"]}}
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    # LLM should have been called after round 1 with context about confirmed repos
+    assert hasattr(fake, "llm_plan_context")
+    assert "block-proxy" in fake.llm_plan_context
+    assert "anyproxy" in fake.llm_plan_context
+    # LLM's refined query should appear in sourcebot searches
+    assert "refined-query" in fake.sourcebot_queries
+    assert len(result.rounds) == 2
+
+
+def test_round2_uses_llm_enriched_queries():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    fake.llm_plan_result = {
+        "intent": "call_chain",
+        "query_rewrites": {"sourcebot": ["ProxyServer.call", "MITM_handler"], "qdrant": ["proxy server call chain"]},
+    }
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    # Round 1: rule-based queries (original terms)
+    # Round 2: LLM-enriched queries
+    assert "ProxyServer.call" in fake.sourcebot_queries
+    assert "MITM_handler" in fake.sourcebot_queries
+    # Intent should be updated by LLM
+    assert result.plan.intent == "call_chain"

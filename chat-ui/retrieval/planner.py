@@ -9,6 +9,7 @@ from .models import RetrievalPlan
 
 
 TOKEN_RE = re.compile(r"@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9_./:-]*[A-Za-z][A-Za-z0-9_./:-]*")
+VALID_INTENTS = {"dependency_relation", "call_chain", "implementation_location", "troubleshooting", "generic_code_answer"}
 
 
 def extract_terms(query: str) -> list[str]:
@@ -103,4 +104,7 @@ def merge_llm_plan(base: RetrievalPlan, llm_plan: dict[str, Any]) -> RetrievalPl
     entity_hints = llm_plan.get("entity_hints")
     if isinstance(entity_hints, dict):
         entities["entity_hints"] = entity_hints
+    intent = llm_plan.get("intent")
+    if isinstance(intent, str) and intent in VALID_INTENTS:
+        return replace(base, intent=intent, template=intent, queries=queries, precision=precision, entities=entities)
     return replace(base, queries=queries, precision=precision, entities=entities)

@@ -411,7 +411,7 @@ if prompt := st.chat_input("输入你的问题..."):
     with st.chat_message("assistant"):
         # LLM Planner adapter
         def llm_plan_query(question: str, plan) -> dict:
-            if not USE_LLM_PLANNER or plan.intent not in {"dependency_relation", "call_chain", "troubleshooting"}:
+            if not USE_LLM_PLANNER:
                 return {}
             try:
                 import anthropic, httpx
@@ -424,11 +424,15 @@ if prompt := st.chat_input("输入你的问题..."):
                     client_kwargs["base_url"] = base_url
                 client_kwargs["http_client"] = httpx.Client(verify=False)
                 client = anthropic.Anthropic(**client_kwargs)
+
+                context = plan.entities.get("round1_context", "") if hasattr(plan, "entities") else ""
+                context_block = f"\n## 初步检索命中\n{context}" if context else ""
+
                 resp = client.messages.create(
                     model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
                     max_tokens=500,
-                    system="你是一个代码检索规划器。根据用户问题返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。",
-                    messages=[{"role": "user", "content": f"问题：{question}\n\n输出格式：\n{{\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
+                    system="你是一个代码检索规划器。根据用户问题和初步检索结果返回 JSON 格式的检索增强建议。只输出 JSON，不要有其他内容。\n\nintent 可选值：dependency_relation（依赖关系）、call_chain（调用链）、implementation_location（实现定位）、troubleshooting（排错）、generic_code_answer（通用问答）。根据问题的实际语义选择，不要被字面关键词误导。\n\n当提供初步检索命中时，请根据实际代码内容判断：哪些仓库最相关、代码中出现了哪些关键符号/依赖、需要进一步搜索什么模式。",
+                    messages=[{"role": "user", "content": f"问题：{question}{context_block}\n\n输出格式：\n{{\n  \"intent\": \"generic_code_answer\",\n  \"query_rewrites\": {{\"sourcebot\": [\"...\"], \"qdrant\": [\"...\"]}},\n  \"entity_hints\": {{\"likely_repo\": \"...\", \"likely_dependency\": \"...\", \"likely_api_symbols\": [\"...\"]}},\n  \"precision_search\": {{\"extra_patterns\": [\"...\"], \"important_files\": [\"...\"]}}\n}}"}],
                 )
                 llm_text = ""
                 for block in resp.content:

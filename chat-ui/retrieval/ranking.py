@@ -45,4 +45,4 @@ def rank_code_repositories(hits: list[RetrievalHit], synthetic_repos: set[str] |
 
 
 def should_run_precision_search(plan: RetrievalPlan, ranked_repos: list[dict]) -> bool:
-    return bool(plan.precision.get("enabled") and ranked_repos)
+    return bool(ranked_repos)
