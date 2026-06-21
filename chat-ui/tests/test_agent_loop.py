@@ -158,3 +158,140 @@ def test_run_retrieval_loop_searches_expanded_sourcebot_queries():
     assert "require('anyproxy')" in fake.sourcebot_queries
     assert result.confirmed_repos == set()
     assert len(result.rounds) == 1
+
+
+def test_likely_repo_hint_does_not_trigger_local_tools_until_confirmed():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    fake.llm_plan_result = {"entity_hints": {"likely_repo": "koa"}}
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("koa 是怎样依赖 koa-router 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    actions = [action for r in result.rounds for action in r.local_actions]
+    assert result.confirmed_repos == set()
+    assert actions == []
+
+
+class FakeBackendsWithHits:
+    def __init__(self):
+        self.sourcebot_queries = []
+        self.qdrant_queries = []
+        self.ast_queries = []
+        self.graph_queries = []
+        self.grep_calls = []
+        self.manifest_calls = []
+        self.llm_plan_result = None
+
+    def search_sourcebot(self, query, top_k):
+        self.sourcebot_queries.append(query)
+        if "anyproxy" in query:
+            return [{"repo": "anyproxy", "path": "package.json", "line": "L1", "start_line": 1, "end_line": 5, "content": '{"name":"@bachi/anyproxy"}'}]
+        if "block-proxy" in query:
+            return [{"repo": "block-proxy", "path": "proxy/proxy.js", "line": "L1", "start_line": 1, "end_line": 3, "content": "const AnyProxy = require('@bachi/anyproxy')"}]
+        return []
+
+    def search_qdrant(self, query, top_k):
+        self.qdrant_queries.append(query)
+        return []
+
+    def search_ast_structure(self, query, results, limit):
+        self.ast_queries.append(query)
+        return []
+
+    def search_graph_relations(self, query, results, limit):
+        self.graph_queries.append(query)
+        return []
+
+    def read_file_content(self, repo, path, start_line, end_line):
+        return ""
+
+    def read_manifest(self, repos_root, repo):
+        self.manifest_calls.append(repo)
+        return []
+
+    def local_tool_list(self, *args, **kwargs):
+        return []
+
+    def local_tool_grep(self, *args, **kwargs):
+        self.grep_calls.append(kwargs)
+        return []
+
+    def local_tool_read(self, *args, **kwargs):
+        return None
+
+    def llm_plan(self, question, plan):
+        return self.llm_plan_result or {}
+
+
+def test_precision_targets_include_confirmed_likely_repos():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    fake.llm_plan_result = {"entity_hints": {"likely_repo": "anyproxy"}}
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    assert "block-proxy" in result.confirmed_repos
+    assert "anyproxy" in result.confirmed_repos
+    actions = [action for r in result.rounds for action in r.local_actions]
+    assert agent_loop.LocalAction("read_manifest", "block-proxy") in actions
+    assert agent_loop.LocalAction("read_manifest", "anyproxy") in actions
+
+
+def test_synthetic_repo_not_a_precision_target():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    for r in result.rounds:
+        for action in r.local_actions:
+            assert action.repo != "ast-service"
+
+
+def test_observe_gaps_emits_missing_manifest_for_confirmed_repo():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    plan = models.RetrievalPlan(
+        "dependency_relation",
+        "dependency_relation",
+        entities={"subject": "block-proxy", "object": "anyproxy"},
+        precision={"enabled": True, "read_manifests": True},
+    )
+
+    actions = agent_loop.observe_gaps(plan, hits=[], ranked_repos=[{"repo": "block-proxy", "score": 10}], confirmed_repos={"block-proxy"})
+
+    assert agent_loop.GapAction("MissingManifest", repo="block-proxy", priority=10) in actions
+
+
+def test_observe_gaps_stops_emitting_manifest_after_hit_exists():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    plan = models.RetrievalPlan(
+        "dependency_relation",
+        "dependency_relation",
+        entities={"subject": "block-proxy", "object": "anyproxy"},
+        precision={"enabled": True, "read_manifests": True},
+    )
+    hits = [models.RetrievalHit("precision_search", "block-proxy", "package.json", "L1-L10", "{}", "file_confirmed")]
+
+    actions = agent_loop.observe_gaps(plan, hits=hits, ranked_repos=[{"repo": "block-proxy", "score": 10}], confirmed_repos={"block-proxy"})
+
+    assert all(action.kind != "MissingManifest" for action in actions)
+
+
+def test_observe_gaps_emits_missing_import_for_dependency():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    plan = models.RetrievalPlan(
+        "dependency_relation",
+        "dependency_relation",
+        entities={"subject": "block-proxy", "object": "anyproxy"},
+        precision={"enabled": True, "read_manifests": True},
+    )
+
+    actions = agent_loop.observe_gaps(plan, hits=[], ranked_repos=[{"repo": "block-proxy", "score": 10}], confirmed_repos={"block-proxy"})
+
+    assert agent_loop.GapAction("MissingImport", repo="block-proxy", package_name="anyproxy", priority=20) in actions

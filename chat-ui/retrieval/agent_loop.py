@@ -183,6 +183,101 @@ def _hydrate_merged_content(merged: list[dict], backends: RetrievalBackends) -> 
     return hydrated
 
 
+def _repo_has_manifest_hit(hits: list[RetrievalHit], repo: str) -> bool:
+    manifest_names = {"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "pyproject.toml", "requirements.txt"}
+    for hit in hits:
+        if hit.source not in {"precision_search", "local_tool"}:
+            continue
+        if hit.repo == repo and hit.path.split("/")[-1] in manifest_names:
+            return True
+    return False
+
+
+def _repo_has_term_hit(hits: list[RetrievalHit], repo: str, term: str) -> bool:
+    if not term:
+        return False
+    term_lower = term.lower()
+    for hit in hits:
+        if hit.source not in {"precision_search", "local_tool"}:
+            continue
+        if hit.repo != repo:
+            continue
+        if not hit.content:
+            continue
+        if term_lower in hit.content.lower():
+            return True
+    return False
+
+
+def observe_gaps(
+    plan: RetrievalPlan,
+    hits: list[RetrievalHit],
+    ranked_repos: list[dict],
+    confirmed_repos: set[str],
+) -> list[GapAction]:
+    actions: list[GapAction] = []
+
+    if plan.intent != "dependency_relation":
+        return actions
+
+    candidate_repos: list[str] = []
+    for item in ranked_repos:
+        repo = item.get("repo", "")
+        if repo and repo in confirmed_repos and repo not in candidate_repos:
+            candidate_repos.append(repo)
+    hinted = plan.entities.get("entity_hints", {}).get("likely_repo") if isinstance(plan.entities.get("entity_hints"), dict) else None
+    if hinted and isinstance(hinted, str) and hinted in confirmed_repos and hinted not in candidate_repos:
+        candidate_repos.append(hinted)
+
+    entity_hints = plan.entities.get("entity_hints") if isinstance(plan.entities.get("entity_hints"), dict) else {}
+    dependency_term = entity_hints.get("likely_dependency") or plan.entities.get("object")
+    if not isinstance(dependency_term, str):
+        dependency_term = ""
+
+    for repo in candidate_repos:
+        if not _repo_has_manifest_hit(hits, repo):
+            actions.append(GapAction("MissingManifest", repo=repo, priority=10))
+        if dependency_term and not _repo_has_term_hit(hits, repo, dependency_term):
+            actions.append(GapAction("MissingImport", repo=repo, package_name=dependency_term, priority=20))
+
+    seen: set[tuple] = set()
+    deduped: list[GapAction] = []
+    for action in sorted(actions, key=lambda a: a.priority):
+        key = (action.kind, action.repo, action.package_name, action.symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+    return deduped
+
+
+def select_precision_repos(plan: RetrievalPlan, ranked_repos: list[dict], confirmed_repos: set[str], limit: int = 3) -> list[str]:
+    repos: list[str] = []
+    hinted = plan.entities.get("entity_hints", {}).get("likely_repo") if isinstance(plan.entities.get("entity_hints"), dict) else None
+    if hinted and isinstance(hinted, str) and hinted in confirmed_repos:
+        repos.append(hinted)
+    for item in ranked_repos:
+        repo = item.get("repo", "")
+        if repo and repo in confirmed_repos and repo not in repos:
+            repos.append(repo)
+        if len(repos) >= limit:
+            break
+    return repos
+
+
+def _execute_gap_action(action: GapAction, repos_root: str, backends: RetrievalBackends) -> list[RetrievalHit]:
+    if not action.repo:
+        return []
+    try:
+        if action.kind == "MissingManifest":
+            return backends.read_manifest(repos_root, action.repo)
+        elif action.kind == "MissingImport" and action.package_name:
+            return backends.local_tool_grep(repos_root, action.repo, pattern=re.escape(action.package_name), max_matches=20)
+    except Exception:
+        pass
+    return []
+
+
 def run_retrieval_loop(
     question: str,
     *,
@@ -255,6 +350,44 @@ def run_retrieval_loop(
 
     # Rank
     ranked_repos = rank_code_repositories(all_hits)
+
+    # Precision search via gap observation
+    from .ranking import should_run_precision_search
+
+    if should_run_precision_search(plan, ranked_repos):
+        gaps = observe_gaps(plan, all_hits, ranked_repos, confirmed_repos)
+        local_actions: list[LocalAction] = []
+        precision_hits: list[RetrievalHit] = []
+
+        for gap in gaps:
+            if gap.kind == "MissingManifest" and gap.repo:
+                local_actions.append(LocalAction("read_manifest", gap.repo))
+            elif gap.kind == "MissingImport" and gap.repo and gap.package_name:
+                local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.package_name)}))
+            elif gap.kind == "MissingApiUsage" and gap.repo and gap.symbol:
+                local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.symbol)}))
+
+        for action in local_actions:
+            if action.repo not in confirmed_repos:
+                continue
+            try:
+                if action.tool == "read_manifest":
+                    new_hits = backends.read_manifest(repos_root, action.repo)
+                elif action.tool == "local_tool_grep":
+                    pattern = action.params.get("pattern", "")
+                    new_hits = backends.local_tool_grep(repos_root, action.repo, pattern=pattern, max_matches=20)
+                else:
+                    continue
+            except Exception as e:
+                notes.append(f"precision error ({action.repo}/{action.tool}): {e}")
+                continue
+            if new_hits:
+                precision_hits.extend(new_hits)
+
+        round1.local_actions = local_actions
+        if precision_hits:
+            all_hits.extend(precision_hits)
+            round1.new_hits = len(all_hits)
 
     round1.new_hits = len(all_hits)
     rounds.append(round1)
