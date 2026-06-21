@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+
 from .models import EvidenceItem, RetrievalHit, RetrievalPlan
+from .ranking import SYNTHETIC_REPOS
 
 
 def evidence_tier(hit: RetrievalHit) -> str:
@@ -42,6 +45,19 @@ def _confidence(items: list[EvidenceItem]) -> str:
     return "unconfirmed"
 
 
+def _repo_roots(hits: list[RetrievalHit], ranked_repos: list[dict]) -> dict[str, str]:
+    repos_root = os.path.expanduser(os.environ.get("REPOS_ROOT", "/repos"))
+    repos: list[str] = []
+    for item in ranked_repos:
+        repo = item.get("repo")
+        if repo and repo not in repos:
+            repos.append(repo)
+    for hit in hits:
+        if hit.repo and hit.repo not in repos and hit.repo not in SYNTHETIC_REPOS:
+            repos.append(hit.repo)
+    return {repo: os.path.join(repos_root, repo) for repo in repos[:10]}
+
+
 def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit], ranked_repos: list[dict]) -> dict:
     evidence: list[EvidenceItem] = []
     for idx, hit in enumerate(hits[:30], start=1):
@@ -63,6 +79,7 @@ def build_evidence_pack(query: str, plan: RetrievalPlan, hits: list[RetrievalHit
         "answer_template": plan.template,
         "entities": plan.entities,
         "candidate_repos": ranked_repos,
+        "repo_roots": _repo_roots(hits, ranked_repos),
         "evidence": [item.to_dict() for item in evidence],
         "confidence": _confidence(evidence),
     }

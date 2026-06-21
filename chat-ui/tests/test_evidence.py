@@ -46,3 +46,26 @@ def test_build_evidence_pack_assigns_high_confidence_for_two_strong_layers():
     assert pack["evidence"][0]["tier"] == "strong"
     assert "retrieval_coverage" not in pack
     assert "known_gaps" not in pack
+
+
+def test_build_evidence_pack_exposes_candidate_repo_roots(monkeypatch):
+    models = load_module("retrieval.models")
+    evidence = load_module("retrieval.evidence")
+    monkeypatch.setenv("REPOS_ROOT", "/Users/hfy/jayli")
+    plan = models.RetrievalPlan("dependency_relation", "dependency_relation")
+    hits = [
+        models.RetrievalHit("sourcebot", "block-proxy", "package.json", "L9", "@bachi/anyproxy", "exact_text"),
+        models.RetrievalHit("sourcebot", "anyproxy", "package.json", "L2", "@bachi/anyproxy", "exact_text"),
+    ]
+
+    pack = evidence.build_evidence_pack(
+        "block-proxy 是怎样依赖 anyproxy 的",
+        plan,
+        hits,
+        [{"repo": "block-proxy", "score": 10}, {"repo": "anyproxy", "score": 8}],
+    )
+
+    assert pack["repo_roots"] == {
+        "block-proxy": "/Users/hfy/jayli/block-proxy",
+        "anyproxy": "/Users/hfy/jayli/anyproxy",
+    }

@@ -32,3 +32,31 @@ def test_should_precision_search_requires_selected_repo():
     plan = models.RetrievalPlan("dependency_relation", "dependency_relation", precision={"enabled": True})
 
     assert ranking.should_run_precision_search(plan, []) is False
+
+
+def test_rank_code_repositories_excludes_synthetic_repos():
+    models = load_module("retrieval.models")
+    ranking = load_module("retrieval.ranking")
+    hits = [
+        models.RetrievalHit("ast", "ast-service", "structure", "", "block-proxy/proxy/proxy.js:L1", "structure"),
+        models.RetrievalHit("sourcebot", "block-proxy", "proxy/proxy.js", "L1", "require('@bachi/anyproxy')", "exact_text"),
+    ]
+
+    ranked = ranking.rank_code_repositories(hits)
+
+    assert [item["repo"] for item in ranked] == ["block-proxy"]
+
+
+def test_rank_repositories_keeps_existing_behavior_for_all_evidence():
+    models = load_module("retrieval.models")
+    ranking = load_module("retrieval.ranking")
+    hits = [
+        models.RetrievalHit("ast", "ast-service", "structure", "", "symbol info", "structure"),
+        models.RetrievalHit("sourcebot", "block-proxy", "proxy/proxy.js", "L1", "require('@bachi/anyproxy')", "exact_text"),
+    ]
+
+    ranked = ranking.rank_repositories(hits)
+
+    repos = [item["repo"] for item in ranked]
+    assert "ast-service" in repos
+    assert "block-proxy" in repos

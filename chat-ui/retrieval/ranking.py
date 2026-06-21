@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from .models import RetrievalHit, RetrievalPlan
 
+SYNTHETIC_REPOS = {"ast-service"}
+
 
 def _hit_score(hit: RetrievalHit) -> int:
     text = f"{hit.path}\n{hit.content}".lower()
@@ -35,6 +37,11 @@ def rank_repositories(hits: list[RetrievalHit]) -> list[dict]:
         {"repo": repo, "score": score, "reasons": reasons.get(repo, [])}
         for repo, score in sorted(scores.items(), key=lambda item: item[1], reverse=True)
     ]
+
+
+def rank_code_repositories(hits: list[RetrievalHit], synthetic_repos: set[str] | None = None) -> list[dict]:
+    blocked = synthetic_repos or SYNTHETIC_REPOS
+    return rank_repositories([hit for hit in hits if hit.repo not in blocked])
 
 
 def should_run_precision_search(plan: RetrievalPlan, ranked_repos: list[dict]) -> bool:
