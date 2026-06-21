@@ -295,3 +295,49 @@ def test_observe_gaps_emits_missing_import_for_dependency():
     actions = agent_loop.observe_gaps(plan, hits=[], ranked_repos=[{"repo": "block-proxy", "score": 10}], confirmed_repos={"block-proxy"})
 
     assert agent_loop.GapAction("MissingImport", repo="block-proxy", package_name="anyproxy", priority=20) in actions
+
+
+def test_extract_discovered_terms_from_strong_hits():
+    models = load_module("retrieval.models")
+    agent_loop = load_module("retrieval.agent_loop")
+    hits = [
+        models.RetrievalHit("sourcebot", "block-proxy", "proxy/proxy.js", "L1", "const AnyProxy = require('@bachi/anyproxy'); new AnyProxy.ProxyServer(options);", "exact_text"),
+        models.RetrievalHit("qdrant", "block-proxy", "README.md", "L1", "semantic mention of ignoredTerm", "semantic"),
+    ]
+
+    terms = agent_loop.extract_discovered_terms(hits)
+
+    assert "@bachi/anyproxy" in terms
+    assert "ignoredTerm" not in terms
+
+
+def test_run_retrieval_loop_calls_ast_and_graph_with_candidate_symbols():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    fake.llm_plan_result = {"query_rewrites": {"sourcebot": ["block-proxy"], "qdrant": ["block-proxy dependency"]}}
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1, use_ast=True, use_graph=True)
+
+    assert fake.ast_queries
+    assert fake.graph_queries
+
+
+def test_run_retrieval_loop_stops_at_max_rounds():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackendsWithHits()
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=2)
+
+    assert len(result.rounds) <= 2
+
+
+def test_run_retrieval_loop_stops_early_when_no_new_work():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    backends = make_backends(agent_loop, fake)
+
+    result = agent_loop.run_retrieval_loop("登录逻辑在哪里", repos_root="/tmp/repos", backends=backends, max_rounds=3)
+
+    assert len(result.rounds) == 1

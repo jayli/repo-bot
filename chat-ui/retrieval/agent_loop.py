@@ -290,7 +290,7 @@ def run_retrieval_loop(
     max_rounds: int = 2,
 ) -> RetrievalLoopResult:
     from .planner import merge_llm_plan, plan_query
-    from .ranking import rank_code_repositories
+    from .ranking import rank_code_repositories, should_run_precision_search
 
     # 1. Initial Planning
     plan = plan_query(question)
@@ -307,97 +307,165 @@ def run_retrieval_loop(
 
     all_sourcebot_results: list[dict] = []
     all_qdrant_results: list[dict] = []
+    all_hits: list[RetrievalHit] = []
+    all_merged: list[dict] = []
+    ast_facts: list[str] = []
+    graph_facts: list[str] = []
     rounds: list[RetrievalRound] = []
     notes: list[str] = []
+    seen_sourcebot_queries: set[str] = set()
 
-    # Round 1: Global search
-    sourcebot_queries = queries["sourcebot"][:8]
-    qdrant_queries = queries["qdrant"][:3]
+    confirmed_repos: set[str] = set()
+    ranked_repos: list[dict] = []
 
-    if use_sourcebot:
-        for q in sourcebot_queries:
-            try:
-                results = backends.search_sourcebot(q, 5)
-                all_sourcebot_results.extend(results)
-            except Exception as e:
-                notes.append(f"sourcebot error ({q}): {e}")
+    prev_hit_count = 0
 
-    if use_qdrant:
-        for q in qdrant_queries:
-            try:
-                results = backends.search_qdrant(q, 5)
-                all_qdrant_results.extend(results)
-            except Exception as e:
-                notes.append(f"qdrant error ({q}): {e}")
+    for round_idx in range(1, max_rounds + 1):
+        round_notes: list[str] = []
+        round_record = RetrievalRound(index=round_idx)
+        is_first_round = round_idx == 1
 
-    round1 = RetrievalRound(
-        index=1,
-        sourcebot_queries=list(sourcebot_queries),
-        qdrant_queries=list(qdrant_queries),
-        notes=list(notes),
-    )
+        if is_first_round:
+            # Round 1: Global search
+            sourcebot_queries = [q for q in queries["sourcebot"][:8] if q not in seen_sourcebot_queries]
+            for q in sourcebot_queries:
+                seen_sourcebot_queries.add(q)
+            qdrant_queries = queries["qdrant"][:3]
 
-    # Dedupe and merge
-    src_hits = to_hits(all_sourcebot_results, "sourcebot")
-    qdr_hits = to_hits(all_qdrant_results, "qdrant")
-    merged = merge_results(all_sourcebot_results, all_qdrant_results)
-    merged = _hydrate_merged_content(merged, backends)
+            round_record.sourcebot_queries = list(sourcebot_queries)
+            round_record.qdrant_queries = list(qdrant_queries)
 
-    all_hits: list[RetrievalHit] = list(src_hits) + list(qdr_hits)
+            if use_sourcebot:
+                for q in sourcebot_queries:
+                    try:
+                        results = backends.search_sourcebot(q, 5)
+                        all_sourcebot_results.extend(results)
+                    except Exception as e:
+                        round_notes.append(f"sourcebot error ({q}): {e}")
 
-    # Confirmed repos
-    confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
+            if use_qdrant:
+                for q in qdrant_queries:
+                    try:
+                        results = backends.search_qdrant(q, 5)
+                        all_qdrant_results.extend(results)
+                    except Exception as e:
+                        round_notes.append(f"qdrant error ({q}): {e}")
 
-    # Rank
-    ranked_repos = rank_code_repositories(all_hits)
+            # Convert results to hits
+            src_hits = to_hits(all_sourcebot_results, "sourcebot")
+            qdr_hits = to_hits(all_qdrant_results, "qdrant")
+            all_hits = list(src_hits) + list(qdr_hits)
+            all_merged = merge_results(all_sourcebot_results, all_qdrant_results)
+            all_merged = _hydrate_merged_content(all_merged, backends)
 
-    # Precision search via gap observation
-    from .ranking import should_run_precision_search
+            confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
+            ranked_repos = rank_code_repositories(all_hits)
 
-    if should_run_precision_search(plan, ranked_repos):
-        gaps = observe_gaps(plan, all_hits, ranked_repos, confirmed_repos)
-        local_actions: list[LocalAction] = []
-        precision_hits: list[RetrievalHit] = []
+            # AST
+            if use_ast and all_merged:
+                ast_queries = queries["ast"][:5]
+                round_record.ast_queries = ast_queries
+                for q in ast_queries:
+                    try:
+                        facts = backends.search_ast_structure(q, all_merged, limit=8)
+                        ast_facts.extend(facts)
+                    except Exception as e:
+                        round_notes.append(f"ast error: {e}")
 
-        for gap in gaps:
-            if gap.kind == "MissingManifest" and gap.repo:
-                local_actions.append(LocalAction("read_manifest", gap.repo))
-            elif gap.kind == "MissingImport" and gap.repo and gap.package_name:
-                local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.package_name)}))
-            elif gap.kind == "MissingApiUsage" and gap.repo and gap.symbol:
-                local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.symbol)}))
+            # Graph
+            if use_graph and all_merged:
+                graph_queries = queries["graph"][:5]
+                round_record.graph_queries = graph_queries
+                for q in graph_queries:
+                    try:
+                        facts = backends.search_graph_relations(q, all_merged, limit=12)
+                        graph_facts.extend(facts)
+                    except Exception as e:
+                        round_notes.append(f"graph error: {e}")
 
-        for action in local_actions:
-            if action.repo not in confirmed_repos:
-                continue
-            try:
-                if action.tool == "read_manifest":
-                    new_hits = backends.read_manifest(repos_root, action.repo)
-                elif action.tool == "local_tool_grep":
-                    pattern = action.params.get("pattern", "")
-                    new_hits = backends.local_tool_grep(repos_root, action.repo, pattern=pattern, max_matches=20)
-                else:
+            # Convert AST/Graph facts to hits
+            for fact in ast_facts:
+                all_hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
+            for fact in graph_facts:
+                all_hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
+
+        # Precision search via gap observation (every round)
+        if should_run_precision_search(plan, ranked_repos):
+            gaps = observe_gaps(plan, all_hits, ranked_repos, confirmed_repos)
+            local_actions: list[LocalAction] = []
+
+            for gap in gaps:
+                if gap.kind == "MissingManifest" and gap.repo:
+                    local_actions.append(LocalAction("read_manifest", gap.repo))
+                elif gap.kind == "MissingImport" and gap.repo and gap.package_name:
+                    local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.package_name)}))
+                elif gap.kind == "MissingApiUsage" and gap.repo and gap.symbol:
+                    local_actions.append(LocalAction("local_tool_grep", gap.repo, {"pattern": re.escape(gap.symbol)}))
+
+            for action in local_actions:
+                if action.repo not in confirmed_repos:
                     continue
-            except Exception as e:
-                notes.append(f"precision error ({action.repo}/{action.tool}): {e}")
-                continue
-            if new_hits:
-                precision_hits.extend(new_hits)
+                try:
+                    if action.tool == "read_manifest":
+                        new_hits = backends.read_manifest(repos_root, action.repo)
+                    elif action.tool == "local_tool_grep":
+                        pattern = action.params.get("pattern", "")
+                        new_hits = backends.local_tool_grep(repos_root, action.repo, pattern=pattern, max_matches=20)
+                    else:
+                        continue
+                except Exception as e:
+                    round_notes.append(f"precision error ({action.repo}/{action.tool}): {e}")
+                    continue
+                if new_hits:
+                    all_hits.extend(new_hits)
 
-        round1.local_actions = local_actions
-        if precision_hits:
-            all_hits.extend(precision_hits)
-            round1.new_hits = len(all_hits)
+            round_record.local_actions = local_actions
 
-    round1.new_hits = len(all_hits)
-    rounds.append(round1)
+        round_record.new_hits = len(all_hits) - prev_hit_count
+        round_record.notes = round_notes
+        prev_hit_count = len(all_hits)
+        rounds.append(round_record)
+
+        # Stop if no new hits this round
+        if round_record.new_hits == 0 and not is_first_round:
+            break
+
+        # After round 1, try follow-up with discovered terms
+        if is_first_round and round_idx < max_rounds:
+            discovered = extract_discovered_terms(all_hits)
+            if discovered:
+                new_queries = [t for t in discovered if t not in seen_sourcebot_queries]
+                if new_queries and use_sourcebot:
+                    for q in new_queries[:5]:
+                        seen_sourcebot_queries.add(q)
+                        try:
+                            results = backends.search_sourcebot(q, 5)
+                            all_sourcebot_results.extend(results)
+                        except Exception as e:
+                            round_notes.append(f"sourcebot follow-up error ({q}): {e}")
+                    # Rebuild hits and ranking for next round
+                    src_hits = to_hits(all_sourcebot_results, "sourcebot")
+                    qdr_hits = to_hits(all_qdrant_results, "qdrant")
+                    all_hits = list(src_hits) + list(qdr_hits)
+                    for fact in ast_facts:
+                        all_hits.append(RetrievalHit("ast", "ast-service", "structure", "", fact, "structure"))
+                    for fact in graph_facts:
+                        all_hits.append(RetrievalHit("neo4j", "ast-service", "graph", "", fact, "graph"))
+                    all_merged = merge_results(all_sourcebot_results, all_qdrant_results)
+                    all_merged = _hydrate_merged_content(all_merged, backends)
+                    confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
+                    ranked_repos = rank_code_repositories(all_hits)
+                else:
+                    break  # No new queries to run
+            else:
+                break  # No discovered terms
 
     return RetrievalLoopResult(
         plan=plan,
         hits=all_hits,
-        merged=merged,
-        ast_facts=[],
-        graph_facts=[],
+        merged=all_merged,
+        ast_facts=ast_facts,
+        graph_facts=graph_facts,
         ranked_repos=ranked_repos,
         confirmed_repos=confirmed_repos,
         rounds=rounds,
