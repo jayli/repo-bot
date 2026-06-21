@@ -124,3 +124,148 @@ def extract_discovered_terms(hits: list[RetrievalHit]) -> list[str]:
             if pkg and pkg not in terms and "/" not in pkg:
                 terms.append(pkg)
     return terms
+
+
+def to_hits(results: list[dict], source: str) -> list[RetrievalHit]:
+    hits = []
+    for r in results:
+        line = r.get("line") or f"L{r.get('start_line', 1)}"
+        hits.append(RetrievalHit(
+            source=source,
+            repo=r.get("repo", ""),
+            path=r.get("path", ""),
+            line_range=line,
+            content=r.get("content", ""),
+            strength="exact_text" if source == "sourcebot" else "semantic",
+            score=r.get("score"),
+        ))
+    return hits
+
+
+def merge_results(src: list, qdr: list, top_k: int = 15) -> list[dict]:
+    k = 60
+    scores: dict[str, float] = {}
+    all_r: dict[str, dict] = {}
+    for rank, r in enumerate(src):
+        key = f"{r['repo']}:{r['path']}:{r['line']}"
+        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
+        all_r[key] = r
+    for rank, r in enumerate(qdr):
+        key = f"{r['repo']}:{r['path']}:{r['line']}"
+        scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
+        all_r[key] = r
+    ranked = sorted(scores.items(), key=lambda x: -x[1])[:top_k]
+    return [all_r[k] for k, _ in ranked]
+
+
+def confirmed_repos_from_results(results: list[dict], synthetic_repos: set[str] | None = None) -> set[str]:
+    from .ranking import SYNTHETIC_REPOS
+
+    blocked = synthetic_repos or SYNTHETIC_REPOS
+    return {item["repo"] for item in results if item.get("repo") and item.get("repo") not in blocked}
+
+
+def _hydrate_merged_content(merged: list[dict], backends: RetrievalBackends) -> list[dict]:
+    hydrated = []
+    for r in merged:
+        if r.get("content"):
+            hydrated.append(r)
+            continue
+        repo = r.get("repo", "")
+        path = r.get("path", "")
+        start = r.get("start_line", 1)
+        end = r.get("end_line", start + 5)
+        try:
+            content = backends.read_file_content(repo, path, start, end)
+        except Exception:
+            content = ""
+        hydrated.append({**r, "content": content})
+    return hydrated
+
+
+def run_retrieval_loop(
+    question: str,
+    *,
+    repos_root: str,
+    backends: RetrievalBackends,
+    use_sourcebot: bool = True,
+    use_qdrant: bool = True,
+    use_ast: bool = True,
+    use_graph: bool = True,
+    max_rounds: int = 2,
+) -> RetrievalLoopResult:
+    from .planner import merge_llm_plan, plan_query
+    from .ranking import rank_code_repositories
+
+    # 1. Initial Planning
+    plan = plan_query(question)
+    if backends.llm_plan:
+        try:
+            llm_result = backends.llm_plan(question, plan)
+            if isinstance(llm_result, dict) and llm_result:
+                plan = merge_llm_plan(plan, llm_result)
+        except Exception:
+            pass
+
+    # 2. Query Expansion
+    queries = expand_queries(question, plan)
+
+    all_sourcebot_results: list[dict] = []
+    all_qdrant_results: list[dict] = []
+    rounds: list[RetrievalRound] = []
+    notes: list[str] = []
+
+    # Round 1: Global search
+    sourcebot_queries = queries["sourcebot"][:8]
+    qdrant_queries = queries["qdrant"][:3]
+
+    if use_sourcebot:
+        for q in sourcebot_queries:
+            try:
+                results = backends.search_sourcebot(q, 5)
+                all_sourcebot_results.extend(results)
+            except Exception as e:
+                notes.append(f"sourcebot error ({q}): {e}")
+
+    if use_qdrant:
+        for q in qdrant_queries:
+            try:
+                results = backends.search_qdrant(q, 5)
+                all_qdrant_results.extend(results)
+            except Exception as e:
+                notes.append(f"qdrant error ({q}): {e}")
+
+    round1 = RetrievalRound(
+        index=1,
+        sourcebot_queries=list(sourcebot_queries),
+        qdrant_queries=list(qdrant_queries),
+        notes=list(notes),
+    )
+
+    # Dedupe and merge
+    src_hits = to_hits(all_sourcebot_results, "sourcebot")
+    qdr_hits = to_hits(all_qdrant_results, "qdrant")
+    merged = merge_results(all_sourcebot_results, all_qdrant_results)
+    merged = _hydrate_merged_content(merged, backends)
+
+    all_hits: list[RetrievalHit] = list(src_hits) + list(qdr_hits)
+
+    # Confirmed repos
+    confirmed_repos = confirmed_repos_from_results(all_sourcebot_results + all_qdrant_results)
+
+    # Rank
+    ranked_repos = rank_code_repositories(all_hits)
+
+    round1.new_hits = len(all_hits)
+    rounds.append(round1)
+
+    return RetrievalLoopResult(
+        plan=plan,
+        hits=all_hits,
+        merged=merged,
+        ast_facts=[],
+        graph_facts=[],
+        ranked_repos=ranked_repos,
+        confirmed_repos=confirmed_repos,
+        rounds=rounds,
+    )

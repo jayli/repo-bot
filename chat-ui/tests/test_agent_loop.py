@@ -69,3 +69,92 @@ def test_expand_queries_handles_no_object():
 
     assert "login" in queries["sourcebot"]
     assert "登录逻辑在哪里" in queries["qdrant"]
+
+
+class FakeBackends:
+    def __init__(self):
+        self.sourcebot_queries = []
+        self.qdrant_queries = []
+        self.ast_queries = []
+        self.graph_queries = []
+        self.llm_plan_result = None
+
+    def search_sourcebot(self, query, top_k):
+        self.sourcebot_queries.append(query)
+        return []
+
+    def search_qdrant(self, query, top_k):
+        self.qdrant_queries.append(query)
+        return []
+
+    def search_ast_structure(self, query, results, limit):
+        self.ast_queries.append(query)
+        return []
+
+    def search_graph_relations(self, query, results, limit):
+        self.graph_queries.append(query)
+        return []
+
+    def read_file_content(self, repo, path, start_line, end_line):
+        return ""
+
+    def read_manifest(self, repos_root, repo):
+        return []
+
+    def local_tool_list(self, *args, **kwargs):
+        return []
+
+    def local_tool_grep(self, *args, **kwargs):
+        return []
+
+    def local_tool_read(self, *args, **kwargs):
+        return None
+
+    def llm_plan(self, question, plan):
+        return self.llm_plan_result or {"query_rewrites": {"sourcebot": ["ProxyServer"], "qdrant": ["MITM proxy engine"]}}
+
+
+def test_run_retrieval_loop_executes_llm_plan_rewrites():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+        fake.llm_plan,
+    )
+
+    agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    assert "ProxyServer" in fake.sourcebot_queries
+    assert "MITM proxy engine" in fake.qdrant_queries
+
+
+def test_run_retrieval_loop_searches_expanded_sourcebot_queries():
+    agent_loop = load_module("retrieval.agent_loop")
+    fake = FakeBackends()
+    backends = agent_loop.RetrievalBackends(
+        fake.search_sourcebot,
+        fake.search_qdrant,
+        fake.search_ast_structure,
+        fake.search_graph_relations,
+        fake.read_file_content,
+        fake.read_manifest,
+        fake.local_tool_list,
+        fake.local_tool_grep,
+        fake.local_tool_read,
+    )
+
+    result = agent_loop.run_retrieval_loop("block-proxy 是怎样依赖 anyproxy 的", repos_root="/tmp/repos", backends=backends, max_rounds=1)
+
+    assert "block-proxy 是怎样依赖 anyproxy 的" not in fake.sourcebot_queries
+    assert "anyproxy" in fake.sourcebot_queries
+    assert "require('anyproxy')" in fake.sourcebot_queries
+    assert result.confirmed_repos == set()
+    assert len(result.rounds) == 1
