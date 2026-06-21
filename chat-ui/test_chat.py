@@ -30,11 +30,9 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 
 from retrieval.agent_loop import RetrievalBackends, run_retrieval_loop
-from retrieval.planner import plan_query, validate_llm_plan, merge_llm_plan
-from retrieval.ranking import rank_repositories
-from retrieval.precision import grep_repo, read_file_window, read_manifest, local_tool_grep, local_tool_read, local_tool_list
+from retrieval.planner import validate_llm_plan
+from retrieval.precision import read_manifest, local_tool_grep, local_tool_read, local_tool_list
 from retrieval.evidence import build_evidence_pack
-from retrieval.models import RetrievalHit
 from prompts.synthesizer import build_system_prompt, build_user_message
 from sourcebot_client import search_sourcebot as sourcebot_search
 
@@ -277,6 +275,185 @@ def search_graph_relations(query: str, results: list[dict], limit: int = 12) -> 
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 
+TOOLS: list[dict] = [
+    {
+        "name": "search_sourcebot",
+        "description": "精确关键词/正则代码搜索，适合搜索函数名、类名、字符串、import/require 语句。无需指定仓库名。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "搜索词或正则表达式"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_qdrant",
+        "description": "语义向量搜索，适合自然语言描述的功能定位、概念搜索。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "自然语言搜索描述"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_ast_structure",
+        "description": "AST 结构索引搜索，适合按符号名查定义位置、调用者和被调用者关系。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "符号名或结构查询"},
+                "repo": {"type": "string", "description": "可选，限定仓库名"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_graph_relations",
+        "description": "Neo4j 图遍历搜索，适合查调用链、影响范围和间接依赖关系。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "符号名或图查询"},
+                "repo": {"type": "string", "description": "可选，限定仓库名"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_manifest",
+        "description": "读取仓库依赖清单（package.json / pyproject.toml 等），适合确认包依赖和版本声明。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"repo": {"type": "string", "description": "仓库名"}},
+            "required": ["repo"],
+        },
+    },
+    {
+        "name": "local_tool_grep",
+        "description": "仓库内正则 grep，适合定位某个符号/字符串在目标仓库哪些文件中出现。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "目标仓库名"},
+                "pattern": {"type": "string", "description": "正则表达式"},
+                "include": {"type": "array", "items": {"type": "string"}, "description": "文件白名单 glob"},
+                "exclude": {"type": "array", "items": {"type": "string"}, "description": "文件黑名单 glob"},
+                "context_lines": {"type": "integer", "description": "上下文行数"},
+            },
+            "required": ["repo", "pattern"],
+        },
+    },
+    {
+        "name": "local_tool_read",
+        "description": "读取仓库内某个文件的内容，可选行范围。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "目标仓库名"},
+                "path": {"type": "string", "description": "仓库内相对文件路径"},
+                "start_line": {"type": "integer", "description": "起始行（1-based）"},
+                "end_line": {"type": "integer", "description": "结束行（1-based，包含）"},
+            },
+            "required": ["repo", "path"],
+        },
+    },
+    {
+        "name": "local_tool_list",
+        "description": "列出仓库内某个目录的文件/子目录列表。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "目标仓库名"},
+                "dir_path": {"type": "string", "description": "仓库内相对目录，空字符串为根目录"},
+                "include": {"type": "array", "items": {"type": "string"}, "description": "文件白名单 glob"},
+                "exclude": {"type": "array", "items": {"type": "string"}, "description": "文件黑名单 glob"},
+            },
+            "required": ["repo"],
+        },
+    },
+]
+
+
+def _dispatch_tool(name: str, args: dict, evidence_pack: dict) -> str:
+    """Execute a tool call and return a compact text result."""
+    repo_roots_map = evidence_pack.get("repo_roots", {})
+    evidence_items = evidence_pack.get("evidence", [])
+
+    def _find_repo_root(repo: str) -> str:
+        path = repo_roots_map.get(repo)
+        if path and os.path.isdir(path):
+            return path
+        # Fallback: try all repos_root entries
+        for r, p in repo_roots_map.items():
+            if r == repo and os.path.isdir(p):
+                return p
+        return ""
+
+    def _evidence_as_results() -> list[dict]:
+        return [{"repo": e.get("repo", ""), "path": e.get("path", ""), "content": e.get("content", "")} for e in evidence_items]
+
+    if name == "search_sourcebot":
+        results = search_sourcebot(args["query"], top_k=5)
+        return json.dumps(results, ensure_ascii=False)[:3000]
+
+    elif name == "search_qdrant":
+        results = search_qdrant(args["query"], top_k=5)
+        return json.dumps(results, ensure_ascii=False)[:3000]
+
+    elif name == "search_ast_structure":
+        repo = args.get("repo")
+        ctx = _evidence_as_results()
+        if repo:
+            ctx = [r for r in ctx if r["repo"] == repo] or ctx
+        facts = search_ast_structure(args["query"], ctx, limit=8)
+        return "\n".join(facts) if facts else "(无命中)"
+
+    elif name == "search_graph_relations":
+        repo = args.get("repo")
+        ctx = _evidence_as_results()
+        if repo:
+            ctx = [r for r in ctx if r["repo"] == repo] or ctx
+        facts = search_graph_relations(args["query"], ctx, limit=8)
+        return "\n".join(facts) if facts else "(无命中)"
+
+    elif name == "read_manifest":
+        repo = args["repo"]
+        root = _find_repo_root(repo) or REPOS_ROOT
+        hits = read_manifest(root, repo)
+        return json.dumps([{"path": h.path, "content": h.content[:500]} for h in hits], ensure_ascii=False) if hits else "(未找到 manifest)"
+
+    elif name == "local_tool_grep":
+        repo = args["repo"]
+        root = _find_repo_root(repo) or REPOS_ROOT
+        kwargs = {"pattern": args["pattern"], "max_matches": 20}
+        if args.get("include"):
+            kwargs["include"] = args["include"]
+        if args.get("exclude"):
+            kwargs["exclude"] = args["exclude"]
+        if args.get("context_lines") is not None:
+            kwargs["context_lines"] = args["context_lines"]
+        hits = local_tool_grep(root, repo, **kwargs)
+        return json.dumps([{"path": h.path, "line_range": h.line_range, "content": h.content[:200]} for h in hits[:10]], ensure_ascii=False) if hits else "(无匹配)"
+
+    elif name == "local_tool_read":
+        repo = args["repo"]
+        root = _find_repo_root(repo) or REPOS_ROOT
+        hit = local_tool_read(root, repo, path=args["path"], start_line=args.get("start_line"), end_line=args.get("end_line"), max_lines=200)
+        return hit.content[:3000] if hit and hit.content else "(文件不存在或为空)"
+
+    elif name == "local_tool_list":
+        repo = args["repo"]
+        root = _find_repo_root(repo) or REPOS_ROOT
+        kwargs = {"dir_path": args.get("dir_path", ""), "max_entries": 100}
+        if args.get("include"):
+            kwargs["include"] = args["include"]
+        if args.get("exclude"):
+            kwargs["exclude"] = args["exclude"]
+        entries = local_tool_list(root, repo, **kwargs)
+        return json.dumps([{"path": e.path, "type": e.metadata.get("type", "?"), "size": e.metadata.get("size", 0)} for e in entries[:30]], ensure_ascii=False) if entries else "(目录为空)"
+
+    return f"未知工具: {name}"
+
+
 def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
@@ -285,23 +462,76 @@ def ask_llm_with_evidence(question: str, evidence_pack: dict) -> str:
     if not evidence_pack.get("evidence"):
         return "未找到足够相关代码证据，请尝试更精确的搜索词。"
 
-    messages = [{"role": "user", "content": build_user_message(question, evidence_pack)}]
+    system = build_system_prompt(evidence_pack.get("answer_template", "generic_code_answer"))
+    messages: list[dict] = [{"role": "user", "content": build_user_message(question, evidence_pack)}]
 
     client_kwargs = {"api_key": api_key}
     if base_url:
         client_kwargs["base_url"] = base_url
     client_kwargs["http_client"] = httpx.Client(verify=False)
     client = anthropic.Anthropic(**client_kwargs)
-    resp = client.messages.create(
-        model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
-        max_tokens=3000,
-        system=build_system_prompt(evidence_pack.get("answer_template", "generic_code_answer")),
-        messages=messages,
-    )
-    for block in resp.content:
-        if hasattr(block, "text") and block.text:
-            return block.text
-    return "(模型未生成文本回答，可能只返回了 thinking block)"
+
+    max_tool_calls = 15
+
+    for _ in range(12):  # max API round-trips
+        resp = client.messages.create(
+            model=os.environ.get("LLM_MODEL", "claude-sonnet-4-6"),
+            max_tokens=3000,
+            system=system,
+            messages=messages,
+            tools=TOOLS,
+        )
+
+        # Collect text and tool_use blocks
+        text_parts: list[str] = []
+        tool_uses: list[dict] = []
+
+        for block in resp.content:
+            if hasattr(block, "text") and block.text:
+                text_parts.append(block.text)
+            if getattr(block, "type", "") == "tool_use":
+                tool_uses.append({"id": block.id, "name": block.name, "input": dict(block.input)})
+
+        # If LLM returned a final text answer (no tool calls), return it
+        if not tool_uses:
+            return "\n".join(text_parts) if text_parts else "(模型未生成文本回答)"
+
+        # Guard against runaway tool calls
+        if len(tool_uses) > max_tool_calls:
+            return "(单轮调用过多工具)"
+
+        # Execute tool calls
+        assistant_content: list[dict] = []
+        if text_parts:
+            assistant_content.append({"type": "text", "text": "\n".join(text_parts)})
+
+        tool_results: list[dict] = []
+        for tu in tool_uses:
+            name = tu["name"]
+            args = tu["input"]
+            print(f"  🔧 {name}({json.dumps(args, ensure_ascii=False)[:120]})")
+            try:
+                result_text = _dispatch_tool(name, args, evidence_pack)
+            except Exception as e:
+                result_text = f"错误: {e}"
+            preview = result_text[:150].replace("\n", " ").strip()
+            if len(result_text) > 150:
+                preview += f" ... ({len(result_text)} chars total)"
+            print(f"      → {preview}")
+            tool_results.append({"tool_use_id": tu["id"], "content": result_text})
+
+        # Build assistant message with tool_use blocks
+        for tu in tool_uses:
+            assistant_content.append({"type": "tool_use", "id": tu["id"], "name": tu["name"], "input": tu["input"]})
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # Build user message with tool results
+        user_content: list[dict] = []
+        for tr in tool_results:
+            user_content.append({"type": "tool_result", "tool_use_id": tr["tool_use_id"], "content": tr["content"]})
+        messages.append({"role": "user", "content": user_content})
+
+    return "(达到最大对话轮次)"
 
 # ── LLM Planner Adapter ─────────────────────────────────────────────────────
 
@@ -344,18 +574,62 @@ def main():
     question = " ".join(sys.argv[1:])
     print(f"🔍 问题: {question}\n")
 
+    # ── 带日志的 backend wrapper ─────────────────────────────────────────
+    round_label = [0]
+
+    def _log(label: str, detail: str = ""):
+        padding = "  " * max(round_label[0], 0)
+        print(f"{padding}[{label}] {detail}")
+
+    def _wrapped_sourcebot(query, top_k):
+        _log("Sourcebot", f'"{query}" top_k={top_k}')
+        return search_sourcebot(query, top_k)
+
+    def _wrapped_qdrant(query, top_k):
+        _log("Qdrant", f'"{query}" top_k={top_k}')
+        return search_qdrant(query, top_k)
+
+    def _wrapped_ast(query, results, limit):
+        _log("AST", f'"{query}" limit={limit}')
+        return search_ast_structure(query, results, limit)
+
+    def _wrapped_graph(query, results, limit):
+        _log("Graph", f'"{query}" limit={limit}')
+        return search_graph_relations(query, results, limit)
+
+    def _wrapped_read_manifest(repos_root, repo):
+        _log("read_manifest", f"{repo}")
+        return read_manifest(repos_root, repo)
+
+    def _wrapped_local_grep(repos_root, repo, **kwargs):
+        pattern = kwargs.get("pattern", "")
+        max_m = kwargs.get("max_matches", "")
+        _log("grep", f"{repo} pattern={pattern} max={max_m}")
+        return local_tool_grep(repos_root, repo, **kwargs)
+
+    def _wrapped_local_read(repos_root, repo, **kwargs):
+        path = kwargs.get("path", "")
+        line = kwargs.get("line", "")
+        _log("read", f"{repo}/{path}:{line}")
+        return local_tool_read(repos_root, repo, **kwargs)
+
+    def _wrapped_llm_plan(question, plan):
+        ctx_len = len(plan.entities.get("round1_context", ""))
+        _log("LLM-plan", f'→ 问题+{ctx_len}chars 上下文')
+        return llm_plan_query(question, plan)
+
     # 1-7. Retrieval loop
     backends = RetrievalBackends(
-        search_sourcebot=search_sourcebot,
-        search_qdrant=search_qdrant,
-        search_ast_structure=search_ast_structure,
-        search_graph_relations=search_graph_relations,
+        search_sourcebot=_wrapped_sourcebot,
+        search_qdrant=_wrapped_qdrant,
+        search_ast_structure=_wrapped_ast,
+        search_graph_relations=_wrapped_graph,
         read_file_content=read_file_content,
-        read_manifest=read_manifest,
+        read_manifest=_wrapped_read_manifest,
         local_tool_list=local_tool_list,
-        local_tool_grep=local_tool_grep,
-        local_tool_read=local_tool_read,
-        llm_plan=llm_plan_query,
+        local_tool_grep=_wrapped_local_grep,
+        local_tool_read=_wrapped_local_read,
+        llm_plan=_wrapped_llm_plan,
     )
 
     print("⏳ 检索中...")
@@ -372,10 +646,37 @@ def main():
 
     # Round diagnostics
     for round_info in result.rounds:
-        print(f"  Round {round_info.index}: Sourcebot={len(round_info.sourcebot_queries)} Qdrant={len(round_info.qdrant_queries)} AST={len(round_info.ast_queries)} Graph={len(round_info.graph_queries)} Local={len(round_info.local_actions)} NewHits={round_info.new_hits}")
+        round_label[0] = round_info.index
+        print(f"── Round {round_info.index} ──")
+        if round_info.sourcebot_queries:
+            print(f"  Sourcebot 查询 ({len(round_info.sourcebot_queries)}):")
+            for q in round_info.sourcebot_queries:
+                print(f"    · {q}")
+        if round_info.qdrant_queries:
+            print(f"  Qdrant 查询 ({len(round_info.qdrant_queries)}):")
+            for q in round_info.qdrant_queries:
+                print(f"    · {q}")
+        if round_info.ast_queries:
+            print(f"  AST 查询 ({len(round_info.ast_queries)}):")
+            for q in round_info.ast_queries:
+                print(f"    · {q}")
+        if round_info.graph_queries:
+            print(f"  Graph 查询 ({len(round_info.graph_queries)}):")
+            for q in round_info.graph_queries:
+                print(f"    · {q}")
+        if round_info.local_actions:
+            print(f"  Local 动作 ({len(round_info.local_actions)}):")
+            for a in round_info.local_actions:
+                if a.tool == "read_manifest":
+                    print(f"    · read_manifest {a.repo}")
+                elif a.tool == "local_tool_grep":
+                    print(f"    · grep {a.repo} pattern={a.params.get('pattern', '?')[:60]}")
+        if round_info.new_hits:
+            print(f"  新命中: {round_info.new_hits}")
         if round_info.notes:
             for note in round_info.notes:
-                print(f"    ⚠️  {note}")
+                print(f"    💡 {note}")
+        print()
 
     print(f"  Total: Sourcebot={len([h for h in hits if h.source == 'sourcebot'])} Qdrant={len([h for h in hits if h.source == 'qdrant'])} Merge={len(merged)}")
     print(f"  AST: {len(ast_facts)} 条  |  Neo4j: {len(graph_facts)} 条")
