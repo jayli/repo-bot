@@ -157,7 +157,7 @@ plan_query() → domain facet expansion (DOMAIN_FACETS)
 
 | 模块 | 职责 |
 |------|------|
-| `prompts/templates.py` | 系统提示模板：`BASE_SYSTEM`、`TOOL_CATALOG`（四路检索+精搜工具描述及使用原则）、`EVIDENCE_RULES`、`DEPENDENCY_TEMPLATE`、`GENERIC_TEMPLATE` |
+| `prompts/templates.py` | 系统提示模板：`BASE_SYSTEM`、`TOOL_CATALOG`（四路检索+精搜工具描述及使用原则）、`EVIDENCE_RULES`、9 种场景模板（`DEPENDENCY` / `CALL_CHAIN` / `IMPLEMENTATION_LOCATION` / `TROUBLESHOOTING` / `SYMBOL_EXPLANATION` / `IMPACT_ANALYSIS` / `COMPARISON` / `ARCHITECTURE_OVERVIEW` / `GENERIC`）、`template_for()` 映射 |
 | `prompts/synthesizer.py` | `build_system_prompt(template)` + `build_user_message(question, evidence_pack)` |
 | `sourcebot_client.py` | Sourcebot v4 API client |
 | `app.py` | Streamlit UI，通过 `run_retrieval_loop()` 调用检索 + `run_answer_tool_loop()` LLM 工具循环，`ProgressLog` 实时进度追踪，流式渲染最终回答。侧边栏检索开关、Evidence Pack expander、工具调用追踪 expander |
@@ -165,7 +165,7 @@ plan_query() → domain facet expansion (DOMAIN_FACETS)
 
 ### 测试架构 (`chat-ui/tests/`)
 
-71 个测试，10 个文件，均用动态 import 模式（无 pytest 插件依赖）：
+90 个测试，10 个文件，均用动态 import 模式（无 pytest 插件依赖）：
 
 ```python
 def load_module(name):
@@ -180,7 +180,7 @@ def load_module(name):
 ```
 
 - `test_agent_loop.py` (21 tests): `FakeBackends` / `FakeBackendsWithHits` 注入，验证 planner rewrites 执行、candidate 派生、探针 promote、query 扩展、confirmed repos 门控、gap 观察、AST/Graph 调用、max_rounds、early stop、泛化词拒绝、Round 2 幂等
-- `test_planner.py` (7 tests): 验证意图分类、entity 提取、PassWall facet 展开、LLM plan 合并、entity_hints/repo_candidates/search_facets 保留
+- `test_planner.py` (11 tests): 验证意图分类（9 种意图）、entity 提取、PassWall facet 展开、LLM plan 合并、entity_hints/repo_candidates/search_facets 保留
 - `test_answer_loop.py` (3 tests): `FakeClient` 注入，验证 tool-use 循环、`on_final_delta` 流式回调、流式失败回退非流式
 - `test_tool_dispatch.py` (1 test): 验证 `dispatch_tool` 仓库名解析 (`repo_roots` map)
 - `test_progress_log.py` (4 tests): 验证 `ProgressLog` 四态追踪、滚动截断、完成/失败/独立错误记录
@@ -188,7 +188,7 @@ def load_module(name):
 - `test_evidence.py` (3 tests): 验证 tier 分级、confidence、repo_roots 排除 synthetic
 - `test_precision.py` (15 tests): 验证本地工具（manifest、grep、read、list）和路径安全
 - `test_sourcebot_client.py` (3 tests)
-- `test_synthesizer.py` (2 tests): 验证系统提示包含证据规则和工具约束
+- `test_synthesizer.py` (13 tests): 验证系统提示包含证据规则和工具约束、9 种场景模板结构、兜底模板、引用来源指令、未知意图降级
 
 设计文档位于 `docs/superpowers/specs/` 和 `docs/superpowers/plans/`。
 

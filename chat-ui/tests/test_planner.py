@@ -93,3 +93,44 @@ def test_generic_chinese_config_query_does_not_expand_passwall_auxiliary_facets(
     assert "uci" not in plan.queries["sourcebot"]
     assert "global" not in plan.queries["sourcebot"]
     assert "node" not in plan.queries["sourcebot"]
+
+
+def test_symbol_explanation_intent():
+    planner = load_planner()
+
+    plan = planner.plan_query("run_retrieval_loop 这个函数是做什么的")
+
+    assert plan.intent == "symbol_explanation"
+    assert plan.template == "symbol_explanation"
+    assert plan.precision["enabled"] is True
+
+
+def test_impact_analysis_intent():
+    planner = load_planner()
+
+    plan = planner.plan_query("修改 tool_dispatch.py 会影响哪些模块")
+
+    assert plan.intent == "impact_analysis"
+    assert plan.template == "impact_analysis"
+    assert plan.precision["enabled"] is True
+
+
+def test_comparison_intent():
+    planner = load_planner()
+
+    plan = planner.plan_query("Sourcebot 和 Qdrant 有什么区别")
+
+    assert plan.intent == "comparison"
+    assert plan.template == "comparison"
+    assert plan.precision["enabled"] is True
+
+
+def test_architecture_overview_intent():
+    planner = load_planner()
+
+    plan = planner.plan_query("这个项目的检索架构是怎样的")
+
+    assert plan.intent == "architecture_overview"
+    assert plan.template == "architecture_overview"
+    assert plan.precision["enabled"] is False
+

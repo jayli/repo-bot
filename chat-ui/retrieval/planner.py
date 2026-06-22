@@ -9,7 +9,17 @@ from .models import RetrievalPlan
 
 
 TOKEN_RE = re.compile(r"@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|[A-Za-z0-9_./:-]*[A-Za-z][A-Za-z0-9_./:-]*")
-VALID_INTENTS = {"dependency_relation", "call_chain", "implementation_location", "troubleshooting", "generic_code_answer"}
+VALID_INTENTS = {
+    "dependency_relation",
+    "call_chain",
+    "implementation_location",
+    "troubleshooting",
+    "symbol_explanation",
+    "impact_analysis",
+    "comparison",
+    "architecture_overview",
+    "generic_code_answer",
+}
 
 DOMAIN_FACETS = [
     (
@@ -74,6 +84,14 @@ def classify_query(query: str) -> str:
         return "implementation_location"
     if any(word in query for word in ["为什么", "报错", "没结果", "怎么修"]):
         return "troubleshooting"
+    if any(word in query for word in ["影响", "波及", "改了会怎样", "后果", "涉及"]):
+        return "impact_analysis"
+    if any(word in query for word in ["区别", "对比", "不同", "各自", "比较"]):
+        return "comparison"
+    if any(word in query for word in ["架构", "整体", "全局", "怎样工作", "原理", "机制"]):
+        return "architecture_overview"
+    if any(word in query for word in ["是什么", "做什么", "干什么", "含义", "作用", "解释"]):
+        return "symbol_explanation"
     return "generic_code_answer"
 
 
@@ -98,7 +116,10 @@ def plan_query(query: str) -> RetrievalPlan:
     qdrant_queries = _extend_unique([query], domain["qdrant"], limit=4)
     ast_queries = raw_terms[:5]
     graph_queries = raw_terms[:5]
-    precision_enabled = intent in {"dependency_relation", "call_chain", "troubleshooting"}
+    precision_enabled = intent in {
+        "dependency_relation", "call_chain", "troubleshooting",
+        "symbol_explanation", "impact_analysis", "comparison",
+    }
 
     return RetrievalPlan(
         intent=intent,
