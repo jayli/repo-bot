@@ -148,6 +148,29 @@ REPOS_ROOT (只读挂载 :ro)
 | `evidence.py` | Evidence Pack 构建：`build_evidence_pack()`、`evidence_tier()`、`_repo_roots()`，导入共享 `SYNTHETIC_REPOS` |
 | `models.py` | 数据类：`RetrievalPlan`、`RetrievalHit`、`EvidenceItem` |
 
+### 意图分类与模板系统
+
+检索循环根据用户查询自动分类为 9 种意图，每种意图对应特定的输出模板：
+
+| 意图 | 触发词示例 | 输出模板 | 用途 |
+|------|-----------|---------|------|
+| `dependency_relation` | "A 依赖 B"、"X 用了 Y" | DEPENDENCY_TEMPLATE | 分析包/模块依赖关系 |
+| `call_chain` | "调用链"、"怎么调到" | CALL_CHAIN_TEMPLATE | 追踪函数调用路径 |
+| `implementation_location` | "在哪里实现"、"定义位置" | IMPLEMENTATION_LOCATION_TEMPLATE | 定位代码实现 |
+| `troubleshooting` | "为什么报错"、"怎么解决" | TROUBLESHOOTING_TEMPLATE | 诊断和修复建议 |
+| `symbol_explanation` | "这个函数干什么"、"解释 X" | SYMBOL_EXPLANATION_TEMPLATE | 解释符号含义 |
+| `impact_analysis` | "改了会影响什么"、"影响范围" | IMPACT_ANALYSIS_TEMPLATE | 变更影响分析 |
+| `comparison` | "A 和 B 的区别"、"对比" | COMPARISON_TEMPLATE | 概念/实现对比 |
+| `architecture_overview` | "整体架构"、"怎么组织" | ARCHITECTURE_OVERVIEW_TEMPLATE | 架构概览 |
+| `generic_code_answer` | 其他查询 | GENERIC_TEMPLATE | 通用代码问答 |
+
+分类逻辑在 `planner.py` 的 `classify_query()` 函数中实现，使用关键词匹配。模板选择由 `template_for(intent)` 返回，所有模板定义在 `prompts/templates.py`。
+
+模板设计原则：
+- 不在正文中标注置信度（避免冗余）
+- 结尾统一列出引用来源（按相关性排序的仓库列表）
+- 正文中使用 `repo/path:Lx-Ly` 格式标注代码位置
+
 ### Multi-Round Retrieval Loop 核心流程
 
 ```
@@ -238,6 +261,8 @@ def load_module(name):
 - **Docker 镜像发布**：chat-ui / ast-service 推送到阿里云 ACR 个人版 `crpi-x1zji86f6jpcd7t1.cn-hangzhou.personal.cr.aliyuncs.com/lijing00333/`。单平台镜像用 `latest-amd64` / `latest-arm64` 标签，双平台用 `latest` manifest。Qdrant 和 Sourcebot 为公共镜像，不纳入构建发布流程。
 - **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot/neo4j 来自 Docker Hub/GHCR）。
 - **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。
+- **索引同步架构**：AST 结构索引（SQLite）是权威来源，Neo4j 图关系是派生存储。`index:ast:incr` 在增量索引时自动检测变更的 repo 并同步图关系。`graph_sync` 表记录每个 repo 的最后同步时间戳，用于增量判断。`index:graph:incr` 可单独触发增量图同步（例如 `index:ast:incr` 未启用 Neo4j 时的补偿同步）。全量重建用 `index:graph`（清空并重建所有 repo 的图）。
+- **Sourcebot 配置同步**：Sourcebot v4 不自动检测新仓库。`sync:sourcebot` 脚本扫描 `REPOS_ROOT` 下所有 git 仓库，自动生成 `config/sourcebot.json`。配置变更后需重启 Sourcebot 容器（`index:sourcebot`）触发 Zoekt 重新索引。已有仓库内的文件变更会被 Zoekt 自动监听并增量更新，无需重启。
 - **Chat UI 图检索**：`search_graph_relations()` 通过 `/graph/impact` 查询多跳调用链，两级 fallback：候选符号匹配 → `/symbols?repo=X` 取 top symbols → 逐个查 impact。`query_impact` 和 `query_call_paths` 同时匹配 `Symbol` 和 `ExternalSymbol` 标签（未解析调用目标是 ExternalSymbol）。CALL 子查询使用 `CALL (s) { ... }` 语法（Neo4j 5.x），非旧式 `CALL { WITH s ... }`。
 - **本地开发 SQLite 同步**：`dev` / `dev:ast` 脚本启动时自动检测 `.data/ast.sqlite`，若为空则从容器 `docker cp repo-bot-ast-service-1:/data/ast.sqlite` 同步到宿主机。
 - **agent_loop.py 约束**：不可导入 Streamlit，不可直接构造 Anthropic/OpenAI 客户端，不可直接读取 `REPOS_ROOT`/`os.environ`。`repos_root` 由调用方显式传入。
