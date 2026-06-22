@@ -248,7 +248,8 @@ def load_module(name):
 ## 关键注意
 
 - **环境变量**：`.env` 和 `config/sourcebot.json` 不提交。`.env.example` 和 `config/sourcebot.json.example` 是模板，`npm run init` 一键复制（不会覆盖已有文件）。
-- **Sourcebot v4 管理员**：首次启动后访问 http://localhost:3000 注册管理员账号。清 `sourcebot_data` 卷会丢失登录态。
+- **DASHSCOPE_API_KEY 警告**：每次 `docker compose` 命令都会显示 `The "DASHSCOPE_API_KEY" variable is not set` 警告，这是正常的，不影响运行。`chat-ui/Dockerfile` 中声明了该变量但非必需。
+- **Sourcebot v4 首次登录**：访问 http://localhost:3000 ，在 "Sign in with credentials" 页面输入**任意邮箱和密码**即可登录（首个用户自动注册为管理员）。登录后去 http://localhost:3000/~/settings/apiKeys 生成 API Key，填入 `.env` 的 `SOURCEBOT_API_KEY`。清 `sourcebot_data` 卷会丢失登录态。
 - **Chat UI 认证**：URL token 鉴权（`?token=<sha256(user:pwd).hex[:16]>`），`_session_store`（`st.cache_resource`）按 token 持久化会话。退出登录或点「新对话」清除服务端会话。
 - **容器内 SSL**：yui.cool 自签证书 → `chat-ui/app.py` 里 `httpx.Client(verify=False)` 和 `anthropic.Anthropic(http_client=...)`。
 - **ThinkingBlock**：某些 LLM 返回推理块无 `.text` 属性 → `ask_llm` 遍历 `resp.content` 找有 `.text` 的 block。
@@ -260,7 +261,7 @@ def load_module(name):
 - **调用图链接**：`link_calls_in_file()` 按符号行范围窄先匹配（防外层类覆盖内层方法），`link_callee_symbols()` 跨文件按名称匹配。
 - **Docker 镜像发布**：chat-ui / ast-service 推送到阿里云 ACR 个人版 `crpi-x1zji86f6jpcd7t1.cn-hangzhou.personal.cr.aliyuncs.com/lijing00333/`。单平台镜像用 `latest-amd64` / `latest-arm64` 标签，双平台用 `latest` manifest。Qdrant 和 Sourcebot 为公共镜像，不纳入构建发布流程。
 - **安装脚本**：`scripts/install.sh` 内联 `docker-compose.yml` 和 `config/sourcebot.json` 模板，引导新手交互输入关键参数后一键拉起全部服务。镜像从远端拉取（chat-ui/ast-service 来自 ACR，qdrant/sourcebot/neo4j 来自 Docker Hub/GHCR）。
-- **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。
+- **Neo4j 图关系**：Neo4j 是派生图存储，SQLite 是权威来源。`NEO4J_ENABLED` 默认 true（Compose）/ false（Python `GraphConfig.from_env()`）。ast-service 通过 lifespan 管理 driver 单例，索引时在 `finish_index_run("ok")` 前刷新图关系。图刷新先 DETACH DELETE 整个 repo 再 MERGE 重建，每 repo 一个写事务，batch_size=1000。测试用 FakeDriver/FakeSession/FakeTransaction，默认不需要真实 Neo4j。Neo4j 5-community，驱动 `neo4j>=5.20,<6`。**注意**：`docker-compose.yml` 硬编码用户名 `neo4j`（忽略 `.env` 的 `NEO4J_USER`），密码至少 8 字符（Neo4j 5 默认限制）。
 - **索引同步架构**：AST 结构索引（SQLite）是权威来源，Neo4j 图关系是派生存储。`index:ast:incr` 在增量索引时自动检测变更的 repo 并同步图关系。`graph_sync` 表记录每个 repo 的最后同步时间戳，用于增量判断。`index:graph:incr` 可单独触发增量图同步（例如 `index:ast:incr` 未启用 Neo4j 时的补偿同步）。全量重建用 `index:graph`（清空并重建所有 repo 的图）。
 - **Sourcebot 配置同步**：Sourcebot v4 不自动检测新仓库。`sync:sourcebot` 脚本扫描 `REPOS_ROOT` 下所有 git 仓库，自动生成 `config/sourcebot.json`。配置变更后需重启 Sourcebot 容器（`index:sourcebot`）触发 Zoekt 重新索引。已有仓库内的文件变更会被 Zoekt 自动监听并增量更新，无需重启。
 - **Chat UI 图检索**：`search_graph_relations()` 通过 `/graph/impact` 查询多跳调用链，两级 fallback：候选符号匹配 → `/symbols?repo=X` 取 top symbols → 逐个查 impact。`query_impact` 和 `query_call_paths` 同时匹配 `Symbol` 和 `ExternalSymbol` 标签（未解析调用目标是 ExternalSymbol）。CALL 子查询使用 `CALL (s) { ... }` 语法（Neo4j 5.x），非旧式 `CALL { WITH s ... }`。
