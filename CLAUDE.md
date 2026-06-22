@@ -69,7 +69,7 @@ docker compose up -d chat-ui
 
 **运行测试**：
 ```bash
-python3 -m pytest chat-ui/tests -q          # chat-ui 全部（47 个）
+python3 -m pytest chat-ui/tests -q          # chat-ui 全部（90 个）
 cd ast-service && python -m pytest -v       # ast-service（50 个）
 python3 -m pytest chat-ui/tests/test_agent_loop.py -q  # 仅检索循环测试
 ```
