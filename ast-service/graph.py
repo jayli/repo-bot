@@ -229,6 +229,11 @@ def graph_health(config: GraphConfig, driver) -> dict:
 def sync_graph_from_sqlite(conn, driver, database: str, repo: str | None = None) -> list[str]:
     if driver is None:
         return []
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+
     if repo:
         repos = [repo]
     else:
@@ -236,7 +241,61 @@ def sync_graph_from_sqlite(conn, driver, database: str, repo: str | None = None)
         repos = [row["repo"] for row in rows]
     for r in repos:
         refresh_repo_graph(conn, driver, database, r)
+        conn.execute(
+            "INSERT INTO graph_sync (repo, synced_at) VALUES (?, ?) "
+            "ON CONFLICT(repo) DO UPDATE SET synced_at = excluded.synced_at",
+            (r, now),
+        )
+    conn.commit()
     return repos
+
+
+def incr_sync_graph_from_sqlite(conn, driver, database: str) -> list[str]:
+    """Incremental graph sync: only refresh repos whose files changed since last graph sync."""
+    if driver is None:
+        return []
+
+    # Find repos with file changes newer than their last graph sync
+    dirty_repos = set()
+
+    # Repos never synced before (in files but not in graph_sync)
+    rows = conn.execute(
+        "SELECT DISTINCT f.repo FROM files f "
+        "LEFT JOIN graph_sync gs ON f.repo = gs.repo "
+        "WHERE f.deleted_at IS NULL AND gs.repo IS NULL"
+    ).fetchall()
+    for row in rows:
+        dirty_repos.add(row["repo"])
+
+    # Repos with indexed_at newer than synced_at
+    rows = conn.execute(
+        "SELECT f.repo, MAX(f.indexed_at) AS latest_index "
+        "FROM files f "
+        "JOIN graph_sync gs ON f.repo = gs.repo "
+        "WHERE f.deleted_at IS NULL "
+        "GROUP BY f.repo "
+        "HAVING MAX(f.indexed_at) > gs.synced_at"
+    ).fetchall()
+    for row in rows:
+        dirty_repos.add(row["repo"])
+
+    if not dirty_repos:
+        return []
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    for r in sorted(dirty_repos):
+        refresh_repo_graph(conn, driver, database, r)
+        conn.execute(
+            "INSERT INTO graph_sync (repo, synced_at) VALUES (?, ?) "
+            "ON CONFLICT(repo) DO UPDATE SET synced_at = excluded.synced_at",
+            (r, now),
+        )
+    conn.commit()
+
+    return sorted(dirty_repos)
 
 
 def query_impact(driver, database: str, repo: str, symbol: str, depth: int, limit: int) -> list[dict]:

@@ -158,6 +158,11 @@ CREATE INDEX IF NOT EXISTS idx_scip_symbols_repo_symbol ON scip_symbols(repo, sc
 CREATE INDEX IF NOT EXISTS idx_scip_occurrences_symbol ON scip_occurrences(repo, scip_symbol);
 CREATE INDEX IF NOT EXISTS idx_scip_relationships_source ON scip_relationships(repo, source_symbol);
 CREATE INDEX IF NOT EXISTS idx_scip_relationships_target ON scip_relationships(repo, target_symbol);
+
+CREATE TABLE IF NOT EXISTS graph_sync (
+  repo TEXT PRIMARY KEY,
+  synced_at TEXT NOT NULL
+);
 """
 
 

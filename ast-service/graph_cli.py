@@ -1,12 +1,12 @@
 import argparse
 
-from db import connect_db
-from graph import GraphConfig, create_driver, ensure_constraints, sync_graph_from_sqlite
+from db import connect_db, init_db
+from graph import GraphConfig, create_driver, ensure_constraints, incr_sync_graph_from_sqlite, sync_graph_from_sqlite
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["sync"])
+    parser.add_argument("command", choices=["sync", "sync-incr"])
     parser.add_argument("--repo")
     args = parser.parse_args()
 
@@ -15,11 +15,19 @@ def main() -> None:
         raise SystemExit("Neo4j is disabled")
 
     conn = connect_db()
+    init_db(conn)
     driver = create_driver(config)
     try:
         ensure_constraints(driver, config.database)
         if args.command == "sync":
-            sync_graph_from_sqlite(conn, driver, config.database, repo=args.repo)
+            repos = sync_graph_from_sqlite(conn, driver, config.database, repo=args.repo)
+            print(f"Full sync complete: {len(repos)} repo(s) synced")
+        elif args.command == "sync-incr":
+            repos = incr_sync_graph_from_sqlite(conn, driver, config.database)
+            if repos:
+                print(f"Incremental sync complete: {len(repos)} repo(s) synced — {', '.join(repos)}")
+            else:
+                print("Incremental sync: no repos need updating")
     finally:
         if driver is not None:
             driver.close()

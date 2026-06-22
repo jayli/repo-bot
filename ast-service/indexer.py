@@ -181,8 +181,17 @@ def run_index(mode: str = "incremental", repo: str | None = None) -> IndexResult
                     repos_needing_graph_refresh.add(indexed_repo)
 
         if graph_config.enabled:
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc).isoformat()
             for indexed_repo in sorted(repos_needing_graph_refresh):
                 refresh_repo_graph(conn, driver, graph_config.database, indexed_repo)
+                conn.execute(
+                    "INSERT INTO graph_sync (repo, synced_at) VALUES (?, ?) "
+                    "ON CONFLICT(repo) DO UPDATE SET synced_at = excluded.synced_at",
+                    (indexed_repo, now),
+                )
+            conn.commit()
 
         finish_index_run(
             conn,
