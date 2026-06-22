@@ -39,6 +39,27 @@ st.markdown(
         text-overflow: ellipsis;
         line-height: 1.45;
     }
+    /* 缩小 Markdown 标题字号：h1=1.7rem，逐级递减 */
+    div.stMarkdown h1,
+    div[data-testid="stMarkdownContainer"] h1 {
+        font-size: 1.7rem !important;
+        line-height: 1.25;
+    }
+    div.stMarkdown h2,
+    div[data-testid="stMarkdownContainer"] h2 {
+        font-size: 1.4rem !important;
+        line-height: 1.3;
+    }
+    div.stMarkdown h3,
+    div[data-testid="stMarkdownContainer"] h3 {
+        font-size: 1.2rem !important;
+        line-height: 1.35;
+    }
+    div.stMarkdown h4,
+    div[data-testid="stMarkdownContainer"] h4 {
+        font-size: 1.05rem !important;
+        line-height: 1.4;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -102,7 +123,7 @@ def get_openai_client():
 @st.cache_resource
 def get_qdrant_client():
     from qdrant_client import QdrantClient
-    return QdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"))
+    return QdrantClient(url=os.environ.get("QDRANT_URL", "http://qdrant:6333"), timeout=10)
 
 @st.cache_resource
 def get_indexed_repos() -> list[str]:
@@ -160,9 +181,22 @@ with st.sidebar:
 # === 搜索后端 ===
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     client = get_qdrant_client()
-    vector = embed_query(query)
+    try:
+        vector = embed_query(query)
+    except Exception as e:
+        raise RuntimeError(f"embedding API 失败: {e}") from e
     collection = os.environ.get("QDRANT_COLLECTION", "codebase")
-    hits = client.query_points(collection, query=vector, limit=top_k)
+    last_err = None
+    for attempt in range(2):
+        try:
+            hits = client.query_points(collection, query=vector, limit=top_k)
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                import time; time.sleep(0.5)
+            else:
+                raise RuntimeError(f"Qdrant 查询失败: {e}") from e
     results = []
     for h in hits.points:
         p = h.payload

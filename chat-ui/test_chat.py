@@ -68,7 +68,7 @@ _qdrant_client: QdrantClient | None = None
 def _get_qdrant_client():
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"))
+        _qdrant_client = QdrantClient(url=os.environ.get("QDRANT_URL", "http://localhost:6333"), timeout=10)
     return _qdrant_client
 
 _indexed_repos_cache: list[str] | None = None
@@ -98,9 +98,22 @@ def get_indexed_repos() -> list[str]:
 
 def search_qdrant(query: str, top_k: int = 10) -> list[dict]:
     client = _get_qdrant_client()
-    vector = embed_query(query)
+    try:
+        vector = embed_query(query)
+    except Exception as e:
+        raise RuntimeError(f"embedding API 失败: {e}") from e
     collection = os.environ.get("QDRANT_COLLECTION", "codebase")
-    hits = client.query_points(collection, query=vector, limit=top_k)
+    last_err = None
+    for attempt in range(2):
+        try:
+            hits = client.query_points(collection, query=vector, limit=top_k)
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                import time; time.sleep(0.5)
+            else:
+                raise RuntimeError(f"Qdrant 查询失败: {e}") from e
     results = []
     for h in hits.points:
         p = h.payload
