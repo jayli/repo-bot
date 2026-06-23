@@ -14,7 +14,7 @@
     "logs": "docker compose logs -f",
     "ps": "docker compose ps",
     "index:qdrant": "docker cp chat-ui/index_code.py repo-bot-chat-ui-1:/app/index_code.py && docker exec repo-bot-chat-ui-1 python /app/index_code.py",
-    "index:qdrant:incr": "bash scripts/incremental-index.sh",
+    "index:qdrant:incr": "docker cp chat-ui/index_code.py repo-bot-chat-ui-1:/app/index_code.py && docker exec repo-bot-chat-ui-1 python /app/index_code.py --incremental",
     "search": "python3 scripts/index-vectors.py --search",
     "open": "open http://localhost:8501",
     "open:sourcebot": "open http://localhost:3000",
