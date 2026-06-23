@@ -1,0 +1,6 @@
+id: bash-call
+language: bash
+rule:
+  kind: command
+field:
+  name: CALLEE

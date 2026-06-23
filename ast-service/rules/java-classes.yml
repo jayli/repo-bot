@@ -1,0 +1,10 @@
+id: java-class
+language: java
+rule:
+  any:
+    - kind: class_declaration
+    - kind: interface_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: class

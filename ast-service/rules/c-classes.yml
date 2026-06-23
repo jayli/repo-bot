@@ -1,0 +1,10 @@
+id: c-type
+language: c
+rule:
+  any:
+    - kind: struct_specifier
+    - kind: enum_specifier
+field:
+  name: NAME
+metadata:
+  entity_kind: class

@@ -1,0 +1,6 @@
+id: java-call
+language: java
+rule:
+  kind: method_invocation
+field:
+  name: CALLEE

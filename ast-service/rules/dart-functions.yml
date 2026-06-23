@@ -1,0 +1,10 @@
+id: dart-function
+language: dart
+rule:
+  any:
+    - kind: function_declaration
+    - kind: method_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: function

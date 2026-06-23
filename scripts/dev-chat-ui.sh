@@ -61,9 +61,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# 检测 Rosetta 并强制 arm64（Rosetta 下 sysctl.proc_translated=1）
+# 纯 x86_64 机器无此 sysctl，不触发；纯 arm64 也不需要
+if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ] && command -v arch >/dev/null 2>&1; then
+  PYTHON="arch -arm64 $PYTHON"
+fi
+
 (
   cd "$ROOT_DIR/ast-service"
-  "$PYTHON" -m uvicorn main:app --host 0.0.0.0 --port 8502 --reload
+  $PYTHON -m uvicorn main:app --host 0.0.0.0 --port 8502 --reload
 ) &
 AST_PID=$!
 
@@ -72,4 +78,4 @@ export AST_SERVICE_URL="http://localhost:8502"
 # Do not use exec for Streamlit here. Replacing the shell would trigger
 # the shell's EXIT trap first, which would kill the background uvicorn
 # process before Streamlit starts.
-"$PYTHON" -m streamlit run chat-ui/app.py --server.port 8501
+$PYTHON -m streamlit run chat-ui/app.py --server.port 8501

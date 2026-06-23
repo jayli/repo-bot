@@ -47,6 +47,46 @@ RULES_BY_LANGUAGE = {
         "calls": _RULES / "ts-calls.yml",
         "imports": _RULES / "ts-imports.yml",
     },
+    "java": {
+        "symbols": [_RULES / "java-functions.yml", _RULES / "java-classes.yml"],
+        "calls": _RULES / "java-calls.yml",
+        "imports": _RULES / "java-imports.yml",
+    },
+    "go": {
+        "symbols": [_RULES / "go-functions.yml", _RULES / "go-classes.yml"],
+        "calls": _RULES / "go-calls.yml",
+        "imports": _RULES / "go-imports.yml",
+    },
+    "rust": {
+        "symbols": [_RULES / "rust-functions.yml", _RULES / "rust-classes.yml"],
+        "calls": [_RULES / "rust-calls.yml", _RULES / "rust-macros.yml"],
+        "imports": _RULES / "rust-imports.yml",
+    },
+    "bash": {
+        "symbols": [_RULES / "bash-functions.yml"],
+        "calls": _RULES / "bash-calls.yml",
+        "imports": _RULES / "bash-imports.yml",
+    },
+    "c": {
+        "symbols": [_RULES / "c-functions.yml", _RULES / "c-classes.yml"],
+        "calls": _RULES / "c-calls.yml",
+        "imports": _RULES / "c-imports.yml",
+    },
+    "cpp": {
+        "symbols": [_RULES / "cpp-functions.yml", _RULES / "cpp-classes.yml"],
+        "calls": _RULES / "cpp-calls.yml",
+        "imports": _RULES / "cpp-imports.yml",
+    },
+    "dart": {
+        "symbols": [_RULES / "dart-functions.yml", _RULES / "dart-classes.yml"],
+        "calls": _RULES / "dart-calls.yml",
+        "imports": _RULES / "dart-imports.yml",
+    },
+    "swift": {
+        "symbols": [_RULES / "swift-functions.yml", _RULES / "swift-classes.yml"],
+        "calls": _RULES / "swift-calls.yml",
+        "imports": _RULES / "swift-imports.yml",
+    },
 }
 
 
@@ -104,8 +144,17 @@ def index_one_file(conn, source: SourceFile) -> tuple[int, int, int, int]:
     symbol_matches = []
     for symbol_rule in rules["symbols"]:
         symbol_matches.extend(run_rule_file(source.abs_path, symbol_rule))
-    call_matches = run_rule_file(source.abs_path, rules["calls"])
-    import_matches = run_rule_file(source.abs_path, rules["imports"])
+    # calls and imports can be a single Path or a list of Paths
+    call_rules = rules["calls"]
+    call_rules = call_rules if isinstance(call_rules, list) else [call_rules]
+    call_matches = []
+    for call_rule in call_rules:
+        call_matches.extend(run_rule_file(source.abs_path, call_rule))
+    import_rules = rules["imports"]
+    import_rules = import_rules if isinstance(import_rules, list) else [import_rules]
+    import_matches = []
+    for import_rule in import_rules:
+        import_matches.extend(run_rule_file(source.abs_path, import_rule))
     symbols = normalize_symbols(source.repo, source.rel_path, source.language, symbol_matches)
     calls = normalize_calls(source.repo, source.rel_path, call_matches)
     imports = normalize_imports(source.repo, source.rel_path, source.language, import_matches)

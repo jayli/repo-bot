@@ -1,0 +1,6 @@
+id: java-import
+language: java
+rule:
+  any:
+    - pattern: import $MODULE;
+    - pattern: import static $MODULE;

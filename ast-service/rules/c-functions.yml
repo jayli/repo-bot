@@ -1,0 +1,8 @@
+id: c-function
+language: c
+rule:
+  kind: function_definition
+field:
+  declarator.declarator: NAME
+metadata:
+  entity_kind: function

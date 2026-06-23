@@ -1,0 +1,8 @@
+id: rust-function
+language: rust
+rule:
+  kind: function_item
+field:
+  name: NAME
+metadata:
+  entity_kind: function

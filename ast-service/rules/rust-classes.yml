@@ -1,0 +1,11 @@
+id: rust-type
+language: rust
+rule:
+  any:
+    - kind: struct_item
+    - kind: enum_item
+    - kind: trait_item
+field:
+  name: NAME
+metadata:
+  entity_kind: class

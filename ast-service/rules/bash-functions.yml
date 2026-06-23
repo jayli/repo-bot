@@ -1,0 +1,8 @@
+id: bash-function
+language: bash
+rule:
+  kind: function_definition
+field:
+  name: NAME
+metadata:
+  entity_kind: function

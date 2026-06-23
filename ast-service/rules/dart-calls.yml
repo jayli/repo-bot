@@ -1,0 +1,6 @@
+id: dart-call
+language: dart
+rule:
+  kind: call_expression
+field:
+  function: CALLEE

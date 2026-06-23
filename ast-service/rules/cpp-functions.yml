@@ -1,0 +1,8 @@
+id: cpp-function
+language: cpp
+rule:
+  kind: function_definition
+field:
+  declarator.declarator: NAME
+metadata:
+  entity_kind: function

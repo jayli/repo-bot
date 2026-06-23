@@ -1,0 +1,6 @@
+id: bash-source
+language: bash
+rule:
+  any:
+    - pattern: source $MODULE
+    - pattern: . $MODULE

@@ -1,0 +1,10 @@
+id: cpp-type
+language: cpp
+rule:
+  any:
+    - kind: class_specifier
+    - kind: struct_specifier
+field:
+  name: NAME
+metadata:
+  entity_kind: class

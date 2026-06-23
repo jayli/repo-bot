@@ -1,0 +1,6 @@
+id: swift-call
+language: swift
+rule:
+  kind: call_expression
+field:
+  function: CALLEE

@@ -1,0 +1,6 @@
+id: go-call
+language: go
+rule:
+  kind: call_expression
+field:
+  function: CALLEE

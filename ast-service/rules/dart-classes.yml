@@ -1,0 +1,10 @@
+id: dart-type
+language: dart
+rule:
+  any:
+    - kind: class_declaration
+    - kind: enum_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: class

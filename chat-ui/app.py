@@ -248,6 +248,13 @@ def search_ast_structure(query: str, results: list[dict], limit: int = 8) -> lis
     import requests
 
     url = os.environ.get("AST_SERVICE_URL", "http://ast-service:8502").rstrip("/")
+
+    # 快速检查服务可用性（1 秒超时）
+    try:
+        requests.get(f"{url}/health", timeout=1)
+    except Exception:
+        return []  # 服务不可用，直接返回空
+
     symbols = candidate_symbols(query, results, limit=limit)
     facts: list[str] = []
     seen: set[str] = set()
@@ -300,6 +307,13 @@ def search_graph_relations(query: str, results: list[dict], limit: int = 12) -> 
     import requests
 
     url = os.environ.get("AST_SERVICE_URL", "http://ast-service:8502").rstrip("/")
+
+    # 快速检查服务可用性（1 秒超时）
+    try:
+        requests.get(f"{url}/health", timeout=1)
+    except Exception:
+        return []  # 服务不可用，直接返回空
+
     symbols = candidate_symbols(query, results, limit=6)
     facts: list[str] = []
     seen: set[str] = set()

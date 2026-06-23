@@ -1,0 +1,6 @@
+id: rust-call
+language: rust
+rule:
+  kind: call_expression
+field:
+  function: CALLEE

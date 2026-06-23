@@ -15,6 +15,11 @@ SKIP_DIRS = {
     ".next",
     "vendor",
     "vendor_",
+    ".gradle",
+    ".idea",
+    ".dart_tool",
+    ".build",
+    "Pods",
 }
 
 EXT_TO_LANGUAGE = {
@@ -23,6 +28,20 @@ EXT_TO_LANGUAGE = {
     ".tsx": "typescript",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".dart": "dart",
+    ".swift": "swift",
 }
 
 

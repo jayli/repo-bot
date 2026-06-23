@@ -44,5 +44,11 @@ if ! "$PYTHON" -c "import fastapi, uvicorn, neo4j" >/dev/null 2>&1; then
   "$PYTHON" -m pip install -r ast-service/requirements.txt
 fi
 
+# 检测 Rosetta 并强制 arm64（Rosetta 下 sysctl.proc_translated=1）
+# 纯 x86_64 机器无此 sysctl，不触发；纯 arm64 也不需要
+if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ] && command -v arch >/dev/null 2>&1; then
+  PYTHON="arch -arm64 $PYTHON"
+fi
+
 cd ast-service
-exec "$PYTHON" -m uvicorn main:app --host 0.0.0.0 --port 8502 --reload
+exec $PYTHON -m uvicorn main:app --host 0.0.0.0 --port 8502 --reload

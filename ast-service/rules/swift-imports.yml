@@ -1,0 +1,4 @@
+id: swift-import
+language: swift
+rule:
+  pattern: import $MODULE

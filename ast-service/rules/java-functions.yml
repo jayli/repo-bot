@@ -1,0 +1,8 @@
+id: java-method
+language: java
+rule:
+  kind: method_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: function

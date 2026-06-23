@@ -1,0 +1,4 @@
+id: c-include
+language: c
+rule:
+  pattern: '#include "$MODULE"'

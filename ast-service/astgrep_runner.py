@@ -22,9 +22,25 @@ LANGUAGE_MAP = {
     "Python": "python",
     "TypeScript": "typescript",
     "JavaScript": "javascript",
+    "Java": "java",
+    "Go": "go",
+    "Rust": "rust",
+    "Bash": "bash",
+    "C": "c",
+    "C++": "cpp",
+    "Dart": "dart",
+    "Swift": "swift",
     "python": "python",
     "typescript": "typescript",
     "javascript": "javascript",
+    "java": "java",
+    "go": "go",
+    "rust": "rust",
+    "bash": "bash",
+    "c": "c",
+    "cpp": "cpp",
+    "dart": "dart",
+    "swift": "swift",
 }
 
 
@@ -36,8 +52,16 @@ def load_rule(path: Path) -> dict[str, Any]:
 SINGLE_CAPTURES = ("NAME", "CALLEE", "MODULE")
 MULTI_CAPTURES = ("ARGS", "BODY", "NAMES", "IMPORTS", "PARAMS")
 
+# field: extraction mapping — captures[KEY] = node.field(FIELD_NAME).text()
+# Used when pattern-based $METAVAR extraction is unreliable (Java modifiers, C++ structs, etc.)
+FIELD_CAP = {
+    "NAME": "name",       # symbol name (method, class, struct, function)
+    "CALLEE": "function", # call target (function/method expression)
+    "MODULE": "path",     # import/include path
+}
 
-def _captures(node: Any) -> dict[str, str]:
+
+def _captures(node: Any, field_map: dict[str, str] | None = None) -> dict[str, str]:
     captures: dict[str, str] = {}
     get_match = getattr(node, "get_match", None)
     if get_match is not None:
@@ -58,6 +82,33 @@ def _captures(node: Any) -> dict[str, str]:
                 values = []
             if values:
                 captures[name] = ", ".join(v.text() for v in values)
+
+    # field: extraction — node.field(FIELD_NAME).text() → captures[KEY]
+    # Supports chained access via dot notation: "declarator.declarator"
+    # Only fills in keys not already set by pattern metavariables
+    if field_map:
+        field_fn = getattr(node, "field", None)
+        if field_fn is not None:
+            for cap_key, field_name in field_map.items():
+                if cap_key in captures:
+                    continue  # pattern metavar takes precedence
+                try:
+                    if isinstance(field_name, list):
+                        # Chained field access: ["declarator", "declarator"]
+                        fnode = node
+                        for fn in field_name:
+                            fnode = fnode.field(fn)
+                            if fnode is None:
+                                break
+                    else:
+                        fnode = field_fn(field_name)
+                except Exception:
+                    fnode = None
+                if fnode is not None:
+                    try:
+                        captures[cap_key] = fnode.text()
+                    except Exception:
+                        pass
     return captures
 
 
@@ -86,6 +137,14 @@ def run_rule_file(source_path: Path, rule_path: Path) -> list[AstGrepMatch]:
     root = SgRoot(source, language)
     metadata = rule_doc.get("metadata") or {}
 
+    # YAML field: {field_name: cap_key} → internal field_map: {cap_key: field_name}
+    # Dot-separated field names become lists for chained access: "declarator.declarator" → ["declarator", "declarator"]
+    field_doc = rule_doc.get("field") or {}
+    field_map = {}
+    for field_key, cap_key in field_doc.items():
+        field_map[cap_key] = field_key.split(".") if "." in field_key else field_key
+    field_map = field_map if field_map else None
+
     nodes = _find_all(root.root(), rule_doc["rule"])
     matches: list[AstGrepMatch] = []
     for node in nodes:
@@ -98,7 +157,7 @@ def run_rule_file(source_path: Path, rule_path: Path) -> list[AstGrepMatch]:
                 end_line=end_line,
                 start_character=start_character,
                 end_character=end_character,
-                captures=_captures(node),
+                captures=_captures(node, field_map),
                 rule_id=rule_doc["id"],
                 entity_kind=metadata.get("entity_kind"),
             )

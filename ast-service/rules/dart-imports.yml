@@ -1,0 +1,4 @@
+id: dart-import
+language: dart
+rule:
+  pattern: import '$MODULE';

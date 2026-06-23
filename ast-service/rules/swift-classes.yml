@@ -1,0 +1,10 @@
+id: swift-type
+language: swift
+rule:
+  any:
+    - kind: class_declaration
+    - kind: protocol_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: class

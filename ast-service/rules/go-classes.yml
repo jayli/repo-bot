@@ -1,0 +1,12 @@
+id: go-type
+language: go
+rule:
+  kind: type_declaration
+  has:
+    any:
+      - kind: struct_type
+      - kind: interface_type
+field:
+  name: NAME
+metadata:
+  entity_kind: class

@@ -1,0 +1,8 @@
+id: swift-function
+language: swift
+rule:
+  kind: function_declaration
+field:
+  name: NAME
+metadata:
+  entity_kind: function

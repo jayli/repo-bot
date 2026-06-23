@@ -1,0 +1,6 @@
+id: cpp-call
+language: cpp
+rule:
+  kind: call_expression
+field:
+  function: CALLEE

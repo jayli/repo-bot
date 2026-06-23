@@ -1,0 +1,4 @@
+id: rust-import
+language: rust
+rule:
+  pattern: use $MODULE;

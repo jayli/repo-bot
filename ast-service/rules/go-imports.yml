@@ -1,0 +1,7 @@
+id: go-import
+language: go
+rule:
+  kind: import_spec
+  has:
+    kind: interpreted_string_literal
+    pattern: "$MODULE"

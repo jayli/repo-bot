@@ -1,0 +1,4 @@
+id: cpp-include
+language: cpp
+rule:
+  pattern: '#include "$MODULE"'
